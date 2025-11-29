@@ -34,14 +34,7 @@
 wget  https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main/easybbr3.sh
 chmod +x easybbr3.sh
 ./easybbr3.sh
-### 安装快捷命令
-
-```bash
-sudo ./bbr.sh --install
-# 之后可直接使用 bbr3 命令
-bbr3
 ```
-
 ## 📖 使用说明
 
 ### 交互式菜单
