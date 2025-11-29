@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #===============================================================================
 #
-#          FILE: bbr.sh
+#          FILE: easybbr3.sh
 #
-#         USAGE: sudo ./bbr.sh [options]
-#                wget -qO- https://raw.githubusercontent.com/xx2468171796/bbr3/main/bbr.sh | sudo bash
+#         USAGE: sudo ./easybbr3.sh [options]
+#                wget -qO- https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main/easybbr3.sh | sudo bash
 #
 #   DESCRIPTION: BBR3 一键安装脚本 - 支持 BBR/BBR2/BBR3 TCP 拥塞控制
 #                支持 Debian 10-13, Ubuntu 16.04-24.04, RHEL/CentOS 7-9
@@ -49,7 +49,7 @@ readonly SCRIPT_VERSION="2.0.1"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]:-$0}")"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 readonly GITHUB_URL="https://github.com/xx2468171796"
-readonly GITHUB_RAW="https://raw.githubusercontent.com/xx2468171796/bbr3/main"
+readonly GITHUB_RAW="https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main"
 
 #===============================================================================
 # 颜色定义
@@ -3841,38 +3841,34 @@ show_main_menu() {
         echo -e "${DIM}当前: $(get_current_algo) / $(get_current_qdisc) | 推荐: $(suggest_best_algo)${NC}"
         echo -e "${DIM}推荐场景: $(get_scene_name "$SCENE_RECOMMENDED")${NC}"
         echo
-        echo -e "${YELLOW}提示: 选项 5 和 6 功能相似，选择其一即可，后者会覆盖前者配置${NC}"
+        echo -e "${YELLOW}提示: 选项 2 和 3 功能相似，选择其一即可，后者会覆盖前者配置${NC}"
         echo
         
         print_menu "请选择操作" \
-            "查看当前状态" \
-            "启用 BBR (推荐)" \
-            "启用 BBR2" \
-            "启用 BBR3" \
+            "安装新内核 (获取BBR3支持)" \
             "场景配置 (按用途优化，推荐VPS代理使用)" \
             "自动优化配置 (按网络环境自动调参)" \
-            "安装新内核" \
+            "查看当前状态" \
             "备份/恢复配置" \
             "卸载配置" \
-            "安装快捷命令 bbr3"
+            "安装快捷命令 bbr3" \
+            "PVE Tools 一键脚本"
         
-        read_choice "请选择" 10
+        read_choice "请选择" 8
         
         case "$MENU_CHOICE" in
             0) 
                 print_info "感谢使用，再见！"
                 exit 0
                 ;;
-            1) show_status ;;
-            2) apply_bbr "bbr" ;;
-            3) apply_bbr "bbr2" ;;
-            4) apply_bbr "bbr3" ;;
-            5) scene_config_menu ;;
-            6) do_auto_tune ;;
-            7) show_kernel_menu ;;
-            8) show_backup_menu ;;
-            9) do_uninstall ;;
-            10) install_shortcut ;;
+            1) show_kernel_menu ;;
+            2) scene_config_menu ;;
+            3) do_auto_tune ;;
+            4) show_status ;;
+            5) show_backup_menu ;;
+            6) do_uninstall ;;
+            7) install_shortcut ;;
+            8) run_pvetools ;;
         esac
         
         echo
@@ -3962,63 +3958,6 @@ show_backup_menu() {
     esac
 }
 
-# 应用 BBR 配置
-apply_bbr() {
-    local algo="$1"
-    
-    print_header "启用 ${algo^^}"
-    
-    # 检查算法是否可用
-    if ! algo_supported "$algo"; then
-        print_error "算法 ${algo} 在当前内核中不可用"
-        print_info "可用算法: $(detect_available_algos)"
-        
-        if is_kernel_install_supported; then
-            echo
-            if confirm "是否安装支持 ${algo} 的新内核？" "n"; then
-                show_kernel_menu
-            fi
-        fi
-        return 1
-    fi
-    
-    # 规范化算法名称
-    local actual_algo
-    actual_algo=$(normalize_algo "$algo")
-    
-    # 设置默认 qdisc
-    local qdisc="fq"
-    
-    # 设置默认缓冲区
-    TUNE_RMEM_MAX=${TUNE_RMEM_MAX:-67108864}
-    TUNE_WMEM_MAX=${TUNE_WMEM_MAX:-67108864}
-    TUNE_TCP_RMEM_HIGH=${TUNE_TCP_RMEM_HIGH:-67108864}
-    TUNE_TCP_WMEM_HIGH=${TUNE_TCP_WMEM_HIGH:-67108864}
-    
-    # 写入配置
-    write_sysctl "$actual_algo" "$qdisc"
-    
-    # 应用配置
-    if apply_sysctl; then
-        apply_qdisc_runtime "$qdisc"
-        
-        echo
-        print_success "配置已应用"
-        print_kv "算法" "$actual_algo"
-        print_kv "队列" "$qdisc"
-        
-        # 验证
-        echo
-        local current
-        current=$(get_current_algo)
-        if [[ "$current" == "$actual_algo" ]]; then
-            print_success "验证通过: 当前算法为 ${current}"
-        else
-            print_warn "验证失败: 期望 ${actual_algo}, 实际 ${current}"
-        fi
-    fi
-}
-
 # 自动优化
 do_auto_tune() {
     print_header "自动优化配置"
@@ -4071,7 +4010,7 @@ install_shortcut() {
     print_header "安装快捷命令"
     
     local shortcut_path="/usr/local/bin/bbr3"
-    local script_url="${GITHUB_RAW}/bbr.sh"
+    local script_url="${GITHUB_RAW}/easybbr3.sh"
     
     echo -e "${DIM}安装后可直接使用 'bbr3' 命令运行此脚本${NC}"
     echo
@@ -4118,6 +4057,46 @@ uninstall_shortcut() {
     if confirm "确定要卸载快捷命令 bbr3？" "n"; then
         rm -f "$shortcut_path"
         print_success "快捷命令已卸载"
+    fi
+}
+
+# 运行 PVE Tools 脚本
+run_pvetools() {
+    print_header "PVE Tools 一键脚本"
+    
+    echo -e "${DIM}Proxmox VE 优化工具，支持换源、去订阅提示等功能${NC}"
+    echo -e "${DIM}项目地址: https://github.com/xx2468171796/pvetools${NC}"
+    echo
+    
+    if ! confirm "是否下载并运行 PVE Tools 脚本？" "n"; then
+        return
+    fi
+    
+    print_step "下载 PVE Tools 脚本..."
+    
+    local pve_script="/tmp/pvetools.sh"
+    local pve_url="https://raw.githubusercontent.com/xx2468171796/pvetools/main/pvetools.sh"
+    
+    # 下载脚本
+    if curl -fsSL "$pve_url" -o "$pve_script" 2>/dev/null; then
+        chmod +x "$pve_script"
+        print_success "下载成功，正在运行..."
+        echo
+        bash "$pve_script"
+        rm -f "$pve_script"
+    elif wget -qO "$pve_script" "$pve_url" 2>/dev/null; then
+        chmod +x "$pve_script"
+        print_success "下载成功，正在运行..."
+        echo
+        bash "$pve_script"
+        rm -f "$pve_script"
+    else
+        print_error "下载失败，请检查网络连接"
+        echo
+        echo -e "手动运行命令："
+        echo -e "${GREEN}wget https://raw.githubusercontent.com/xx2468171796/pvetools/main/pvetools.sh${NC}"
+        echo -e "${GREEN}chmod +x pvetools.sh && ./pvetools.sh${NC}"
+        return 1
     fi
 }
 
