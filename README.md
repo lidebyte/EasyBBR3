@@ -32,11 +32,18 @@
 
 ```bash
 # 方式一：wget
-wget -qO- https://raw.githubusercontent.com/xx2468171796/bbr3/main/bbr.sh | sudo bash
+wget  https://raw.githubusercontent.com/xx2468171796/bbr3/main/bbr.sh
+chmod +x bbr.sh
+./bbr.sh
 
 # 方式二：curl
 curl -fsSL https://raw.githubusercontent.com/xx2468171796/bbr3/main/bbr.sh | sudo bash
 ```
+
+wget https://raw.githubusercontent.com/xx2468171796/pvetools/main/pvetools.sh
+chmod +x pvetools.sh
+./pvetools.sh
+
 
 ### 下载后运行
 
