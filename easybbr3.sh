@@ -13,8 +13,8 @@
 #  REQUIREMENTS: root 权限, bash 4.0+
 #        AUTHOR: 孤独制作
 #       VERSION: 2.0.1
-#       CREATED: 2025
-#      REVISION: 2025-11-24
+#       CREATED: 2024
+#      REVISION: 2024-11-29
 #       LICENSE: MIT
 #      TELEGRAM: https://t.me/+RZMe7fnvvUg1OWJl
 #        GITHUB: https://github.com/xx2468171796
@@ -2224,49 +2224,339 @@ ask_line_type() {
     esac
 }
 
-# 自动检测线路类型
+# ========== 三网回程线路检测 ==========
+
+# 三网测试 IP
+declare -A CARRIER_TEST_IPS=(
+    ["telecom"]="114.114.114.114"
+    ["unicom"]="210.22.70.3"
+    ["mobile"]="211.136.192.6"
+)
+
+# 运营商中文名
+declare -A CARRIER_NAMES=(
+    ["telecom"]="电信"
+    ["unicom"]="联通"
+    ["mobile"]="移动"
+)
+
+# 检测结果存储
+declare -A RETURN_PATH_RESULTS
+
+# 检查 nexttrace 是否已安装
+check_nexttrace() {
+    command -v nexttrace &>/dev/null
+}
+
+# 安装 nexttrace
+install_nexttrace() {
+    print_step "安装 nexttrace..."
+    
+    local arch=""
+    case "$(uname -m)" in
+        x86_64|amd64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        armv7l) arch="armv7" ;;
+        *) print_warn "不支持的架构: $(uname -m)"; return 1 ;;
+    esac
+    
+    local url="https://github.com/nxtrace/NTrace-core/releases/latest/download/nexttrace_linux_${arch}"
+    
+    if curl -sL --max-time 30 "$url" -o /tmp/nexttrace 2>/dev/null; then
+        chmod +x /tmp/nexttrace
+        mv /tmp/nexttrace /usr/local/bin/nexttrace 2>/dev/null || mv /tmp/nexttrace /usr/bin/nexttrace
+        if check_nexttrace; then
+            print_success "nexttrace 安装成功"
+            return 0
+        fi
+    fi
+    
+    print_warn "nexttrace 安装失败，将使用备用方法"
+    return 1
+}
+
+# 确保 nexttrace 可用
+ensure_nexttrace() {
+    if check_nexttrace; then
+        return 0
+    fi
+    
+    echo
+    if confirm "需要安装 nexttrace 以精确检测三网回程，是否安装？" "y"; then
+        install_nexttrace
+        return $?
+    else
+        print_info "跳过 nexttrace 安装，将使用简化检测"
+        return 1
+    fi
+}
+
+# 使用 nexttrace 检测回程 AS 路径
+detect_return_path_nexttrace() {
+    local target_ip="$1"
+    local timeout="${2:-15}"
+    
+    local output=""
+    output=$(timeout "$timeout" nexttrace -q 1 -n "$target_ip" 2>/dev/null || true)
+    
+    if [[ -z "$output" ]]; then
+        return 1
+    fi
+    
+    # 提取 AS 号列表
+    local as_list=""
+    as_list=$(echo "$output" | grep -oE 'AS[0-9]+' | tr '\n' ' ' | sed 's/ $//')
+    
+    echo "$as_list"
+}
+
+# 使用 traceroute 检测回程 AS 路径 (备用)
+detect_return_path_traceroute() {
+    local target_ip="$1"
+    local timeout="${2:-15}"
+    
+    if ! command -v traceroute &>/dev/null; then
+        return 1
+    fi
+    
+    local output=""
+    output=$(timeout "$timeout" traceroute -A -n -m 15 "$target_ip" 2>/dev/null || true)
+    
+    if [[ -z "$output" ]]; then
+        return 1
+    fi
+    
+    # 提取 AS 号列表
+    local as_list=""
+    as_list=$(echo "$output" | grep -oE '\[AS[0-9]+\]' | sed 's/\[//g; s/\]//g' | tr '\n' ' ' | sed 's/ $//')
+    
+    echo "$as_list"
+}
+
+# 根据 AS 路径识别线路类型
+identify_line_from_as() {
+    local as_path="$1"
+    local carrier="$2"
+    
+    local line_type="unknown"
+    local line_name="未知"
+    
+    case "$carrier" in
+        telecom)
+            if echo "$as_path" | grep -q "AS4809"; then
+                if echo "$as_path" | grep -q "AS4134"; then
+                    line_type="cn2gt"
+                    line_name="CN2 GT"
+                else
+                    line_type="cn2gia"
+                    line_name="CN2 GIA"
+                fi
+            elif echo "$as_path" | grep -q "AS4134"; then
+                line_type="163"
+                line_name="163"
+            fi
+            ;;
+        unicom)
+            if echo "$as_path" | grep -q "AS9929"; then
+                line_type="9929"
+                line_name="9929 (精品)"
+            elif echo "$as_path" | grep -q "AS4837"; then
+                line_type="4837"
+                line_name="4837"
+            elif echo "$as_path" | grep -q "AS10099"; then
+                line_type="10099"
+                line_name="10099 (国际)"
+            fi
+            ;;
+        mobile)
+            if echo "$as_path" | grep -q "AS58807"; then
+                line_type="cmin2"
+                line_name="CMIN2 (精品)"
+            elif echo "$as_path" | grep -q "AS58453"; then
+                line_type="cmi"
+                line_name="CMI"
+            elif echo "$as_path" | grep -q "AS9808"; then
+                line_type="mobile"
+                line_name="移动骨干"
+            fi
+            ;;
+    esac
+    
+    echo "${line_type}|${line_name}"
+}
+
+# 检测单个运营商回程
+detect_carrier_return_path() {
+    local carrier="$1"
+    local target_ip="${CARRIER_TEST_IPS[$carrier]}"
+    local carrier_name="${CARRIER_NAMES[$carrier]}"
+    
+    echo -n "  检测${carrier_name}回程..."
+    
+    local as_path=""
+    
+    # 优先使用 nexttrace
+    if check_nexttrace; then
+        as_path=$(detect_return_path_nexttrace "$target_ip" 15)
+    fi
+    
+    # 降级到 traceroute
+    if [[ -z "$as_path" ]]; then
+        as_path=$(detect_return_path_traceroute "$target_ip" 15)
+    fi
+    
+    if [[ -n "$as_path" ]]; then
+        local result
+        result=$(identify_line_from_as "$as_path" "$carrier")
+        local line_type="${result%%|*}"
+        local line_name="${result##*|}"
+        
+        RETURN_PATH_RESULTS["${carrier}_type"]="$line_type"
+        RETURN_PATH_RESULTS["${carrier}_name"]="$line_name"
+        RETURN_PATH_RESULTS["${carrier}_as"]="$as_path"
+        
+        echo -e " ${GREEN}${line_name}${NC}"
+    else
+        RETURN_PATH_RESULTS["${carrier}_type"]="timeout"
+        RETURN_PATH_RESULTS["${carrier}_name"]="检测超时"
+        RETURN_PATH_RESULTS["${carrier}_as"]="-"
+        
+        echo -e " ${YELLOW}超时${NC}"
+    fi
+}
+
+# 显示三网回程检测结果
+show_return_path_results() {
+    echo
+    echo -e "  ${BOLD}三网回程检测结果${NC}"
+    print_separator
+    echo
+    printf "    ${BOLD}%-8s${NC} │ ${BOLD}%-15s${NC} │ ${BOLD}%-s${NC}\n" "运营商" "回程线路" "关键 AS"
+    echo "    ─────────┼─────────────────┼──────────────────────"
+    
+    for carrier in telecom unicom mobile; do
+        local name="${CARRIER_NAMES[$carrier]}"
+        local line="${RETURN_PATH_RESULTS[${carrier}_name]:-未检测}"
+        local as_path="${RETURN_PATH_RESULTS[${carrier}_as]:-}"
+        
+        # 截取关键 AS (最多显示 3 个)
+        local key_as=""
+        key_as=$(echo "$as_path" | awk '{for(i=1;i<=3&&i<=NF;i++) printf "%s ", $i}' | sed 's/ $//')
+        [[ -z "$key_as" ]] && key_as="-"
+        
+        printf "    %-8s │ %-15s │ %s\n" "$name" "$line" "$key_as"
+    done
+    echo
+}
+
+# 根据三网检测结果推荐最优线路配置
+recommend_line_config() {
+    local telecom_type="${RETURN_PATH_RESULTS[telecom_type]:-unknown}"
+    local unicom_type="${RETURN_PATH_RESULTS[unicom_type]:-unknown}"
+    local mobile_type="${RETURN_PATH_RESULTS[mobile_type]:-unknown}"
+    
+    # 优先级: cn2gia > cmin2 > 9929 > cn2gt > cmi > 4837 > 163 > unknown
+    local best_type="unknown"
+    
+    if [[ "$telecom_type" == "cn2gia" ]]; then
+        best_type="cn2gia"
+    elif [[ "$mobile_type" == "cmin2" ]]; then
+        best_type="cmin2"
+    elif [[ "$unicom_type" == "9929" ]]; then
+        best_type="9929"
+    elif [[ "$telecom_type" == "cn2gt" ]]; then
+        best_type="cn2gt"
+    elif [[ "$mobile_type" == "cmi" ]]; then
+        best_type="cmi"
+    elif [[ "$unicom_type" == "4837" ]]; then
+        best_type="4837"
+    elif [[ "$telecom_type" == "163" ]]; then
+        best_type="163"
+    fi
+    
+    echo "$best_type"
+}
+
+# 自动检测线路类型 (增强版 - 三网回程检测)
 detect_line_type() {
     echo
     print_info "正在自动检测线路类型..."
+    echo
     
-    local as_num=""
+    # 尝试使用三网回程检测
+    local use_advanced=false
     
-    # 方法1: 使用 ipinfo.io API 获取 AS 信息 (更可靠)
-    if [[ -z "$as_num" ]]; then
+    if check_nexttrace || command -v traceroute &>/dev/null; then
+        # 询问是否进行详细检测
+        if confirm "是否进行三网回程详细检测？(约 30-60 秒)" "y"; then
+            use_advanced=true
+            
+            # 如果没有 nexttrace，尝试安装
+            if ! check_nexttrace; then
+                ensure_nexttrace || true
+            fi
+            
+            echo
+            print_step "开始三网回程检测..."
+            echo
+            
+            # 检测三网回程
+            for carrier in telecom unicom mobile; do
+                detect_carrier_return_path "$carrier"
+            done
+            
+            # 显示结果
+            show_return_path_results
+            
+            # 推荐配置
+            local recommended
+            recommended=$(recommend_line_config)
+            
+            if [[ "$recommended" != "unknown" ]]; then
+                PROXY_LINE_TYPE="$recommended"
+                local type_name=""
+                case "$recommended" in
+                    cn2gia) type_name="CN2 GIA" ;;
+                    cn2gt) type_name="CN2 GT" ;;
+                    cmi) type_name="CMI" ;;
+                    cmin2) type_name="CMIN2" ;;
+                    9929) type_name="9929" ;;
+                    4837) type_name="4837" ;;
+                    163) type_name="163" ;;
+                esac
+                print_success "推荐配置: $type_name"
+                return 0
+            fi
+        fi
+    fi
+    
+    # 降级: 使用简单的 AS 检测
+    if [[ "$use_advanced" == "false" ]] || [[ "$PROXY_LINE_TYPE" == "unknown" ]]; then
+        print_info "使用简化检测..."
+        
+        local as_num=""
+        
+        # 方法1: 使用 ipinfo.io API 获取 AS 信息
         local org_info=""
         org_info=$(curl -s --max-time 5 ipinfo.io/org 2>/dev/null || true)
         if [[ -n "$org_info" ]]; then
             as_num=$(echo "$org_info" | grep -oE 'AS[0-9]+' | head -1 || true)
         fi
-    fi
-    
-    # 方法2: 尝试 traceroute 检测 AS 号 (备用)
-    if [[ -z "$as_num" ]] && command -v traceroute &>/dev/null; then
-        as_num=$(traceroute -A -n -m 5 8.8.8.8 2>/dev/null | grep -oE 'AS[0-9]+' | head -1 || true)
-    fi
-    
-    # 方法3: 使用 whois 查询本机 IP (备用)
-    if [[ -z "$as_num" ]] && command -v whois &>/dev/null; then
-        local my_ip=""
-        my_ip=$(curl -s --max-time 3 ifconfig.me 2>/dev/null || curl -s --max-time 3 ip.sb 2>/dev/null || true)
-        if [[ -n "$my_ip" ]]; then
-            as_num=$(whois "$my_ip" 2>/dev/null | grep -iE 'origin|OriginAS' | grep -oE 'AS[0-9]+' | head -1 || true)
+        
+        if [[ -n "$as_num" ]]; then
+            log_debug "检测到 AS 号: $as_num"
+            case "$as_num" in
+                AS4809)  PROXY_LINE_TYPE="cn2gia"; print_success "检测到 CN2 线路 ($as_num)" ;;
+                AS58453) PROXY_LINE_TYPE="cmi"; print_success "检测到 CMI 线路 ($as_num)" ;;
+                AS9929)  PROXY_LINE_TYPE="9929"; print_success "检测到 9929 线路 ($as_num)" ;;
+                AS4837)  PROXY_LINE_TYPE="4837"; print_success "检测到 4837 线路 ($as_num)" ;;
+                AS4134)  PROXY_LINE_TYPE="163"; print_success "检测到 163 线路 ($as_num)" ;;
+                *)       PROXY_LINE_TYPE="unknown"; print_info "AS: $as_num (非中国运营商，使用通用配置)" ;;
+            esac
+        else
+            PROXY_LINE_TYPE="unknown"
+            print_warn "无法检测线路类型，使用默认配置"
         fi
-    fi
-    
-    if [[ -n "$as_num" ]]; then
-        log_debug "检测到 AS 号: $as_num"
-        case "$as_num" in
-            AS4809)  PROXY_LINE_TYPE="cn2gia"; print_success "检测到 CN2 线路 ($as_num)" ;;
-            AS58453) PROXY_LINE_TYPE="cmi"; print_success "检测到 CMI 线路 ($as_num)" ;;
-            AS9929)  PROXY_LINE_TYPE="9929"; print_success "检测到 9929 线路 ($as_num)" ;;
-            AS4837)  PROXY_LINE_TYPE="4837"; print_success "检测到 4837 线路 ($as_num)" ;;
-            AS4134)  PROXY_LINE_TYPE="163"; print_success "检测到 163 线路 ($as_num)" ;;
-            *)       PROXY_LINE_TYPE="unknown"; print_info "AS: $as_num (非中国大陆线路，使用通用配置)" ;;
-        esac
-    else
-        PROXY_LINE_TYPE="unknown"
-        print_warn "无法检测线路类型，使用默认配置"
     fi
 }
 
