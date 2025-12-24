@@ -1,12 +1,30 @@
-# BBR3 一键安装脚本
+<div align="center">
+
+# 🚀 EasyBBR3 - BBR3 一键安装脚本
 
 [![GitHub](https://img.shields.io/badge/GitHub-xx2468171796-blue?logo=github)](https://github.com/xx2468171796)
 [![Telegram](https://img.shields.io/badge/Telegram-加入群组-blue?logo=telegram)](https://t.me/+RZMe7fnvvUg1OWJl)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/Version-2.0.1-orange.svg)](https://github.com/xx2468171796/EasyBBR3)
+[![Stars](https://img.shields.io/github/stars/xx2468171796/EasyBBR3?style=social)](https://github.com/xx2468171796/EasyBBR3)
 
-> 🚀 一键安装 BBR/BBR2/BBR3 TCP 拥塞控制算法，支持多种场景优化模式
->
-> 作者：**孤独制作** | 电报群：[https://t.me/+RZMe7fnvvUg1OWJl](https://t.me/+RZMe7fnvvUg1OWJl)
+**一键安装 BBR/BBR2/BBR3 TCP 拥塞控制算法，支持多种场景优化模式**
+
+[📱 加入电报群](https://t.me/+RZMe7fnvvUg1OWJl) · [🐛 问题反馈](https://github.com/xx2468171796/EasyBBR3/issues) · [⭐ 给个 Star](https://github.com/xx2468171796/EasyBBR3)
+
+</div>
+
+---
+
+## 👨‍💻 作者信息
+
+| 项目 | 信息 |
+|------|------|
+| **作者** | 孤独制作 |
+| **电报群** | [https://t.me/+RZMe7fnvvUg1OWJl](https://t.me/+RZMe7fnvvUg1OWJl) |
+| **GitHub** | [https://github.com/xx2468171796](https://github.com/xx2468171796) |
+
+> 💬 **遇到问题？** 欢迎加入电报群交流讨论，获取最新更新和技术支持！
 
 ## ✨ 功能特点
 
@@ -29,12 +47,31 @@
 ## 🚀 快速开始
 
 ### 一键运行
-### 先 apt update 更新一下系统 软件源 再 运行软件安装新内核，可能会提示下载失败，这个时候再一次apt update 再次运行就可以了，有些时候不需要这样看你的系统里面有没有 源
+
 ```bash
-wget  https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main/easybbr3.sh
-chmod +x easybbr3.sh
-./easybbr3.sh
+# 方式一：wget
+wget -qO- https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main/easybbr3.sh | sudo bash
+
+# 方式二：curl
+curl -fsSL https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main/easybbr3.sh | sudo bash
 ```
+
+### 下载后运行
+
+```bash
+wget https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main/easybbr3.sh
+chmod +x easybbr3.sh
+sudo ./easybbr3.sh
+```
+
+### 安装快捷命令
+
+```bash
+sudo ./easybbr3.sh --install
+# 之后可直接使用 bbr3 命令
+bbr3
+```
+
 ## 📖 使用说明
 
 ### 交互式菜单
@@ -42,16 +79,17 @@ chmod +x easybbr3.sh
 运行脚本后会显示交互式菜单：
 
 ```
-1) 安装新内核 (获取BBR3支持)
-2) 场景配置 (按用途优化，推荐VPS代理使用)
-3) 自动优化配置 (按网络环境自动调参)
-4) 查看当前状态
-5) 备份/恢复配置
-6) 卸载配置
-7) 安装快捷命令 bbr3
-8) PVE Tools 一键脚本
+1) 查看当前状态
+2) 启用 BBR (推荐)
+3) 启用 BBR2
+4) 启用 BBR3
+5) 场景配置 (按用途优化，推荐VPS代理使用)
+6) 自动优化配置 (按网络环境自动调参)
+7) 安装新内核
+8) 备份/恢复配置
+9) 卸载配置
+10) 安装快捷命令 bbr3
 0) 返回/退出
-
 ```
 
 ### 命令行参数
@@ -65,6 +103,15 @@ sudo bbr3 --algo bbr3 --apply
 
 # 自动优化
 sudo bbr3 --auto
+
+# 代理智能调优向导（推荐翻墙用户）
+sudo bbr3 --proxy-tune
+
+# 验证优化是否生效
+sudo bbr3 --verify
+
+# 查看健康评分
+sudo bbr3 --health
 
 # 安装 XanMod 内核
 sudo bbr3 --install-kernel xanmod
@@ -88,19 +135,49 @@ sudo bbr3 --help
 | 性能模式 | 高性能计算/数据库 | 全面性能优化 |
 | **代理模式** | **VPS代理/VPN** | **抗丢包、低延迟、快速重连** |
 
-### 🔥 代理模式（推荐 VPS 使用）
+### 🔥 代理智能调优向导（推荐 VPS 使用）
 
-专为代理/VPN 场景优化，适用于：
-- V2Ray / Xray / Trojan / Trojan-Go
-- Shadowsocks / ShadowsocksR / Clash
-- WireGuard / OpenVPN / IPsec
-- Hysteria / TUIC / NaiveProxy
+**10 步智能向导**，根据您的具体需求生成最优配置：
+
+1. 硬件检测（自动评分）
+2. 内核检测（BBR3 可用性）
+3. 链路架构（单机/中转/落地）
+4. 服务器位置
+5. 客户端位置
+6. 线路类型（CN2/CMI/9929 等）
+7. 代理内核（Xray/Sing-box 等）
+8. 代理协议（VLESS/Hysteria 等）
+9. 资源分配
+10. 高级优化选项
+
+支持的代理协议：
+- **TCP 协议**：VLESS / VMess / Trojan / Shadowsocks / Naive
+- **UDP 协议**：Hysteria / TUIC
+- **透明代理**：Tun / TProxy
 
 核心优化：
 - ✅ 抗丢包：BBR3 对丢包不敏感，跨国线路更稳定
 - ✅ 低延迟：优化 TCP 参数减少响应时间
 - ✅ 快速重连：禁用慢启动，断线重连更快
 - ✅ TFO 加速：TCP Fast Open 减少握手延迟
+- ✅ 低配优化：针对小内存 VPS 的激进优化模式
+
+### ✅ 优化验证系统
+
+确保您的优化真正生效：
+
+```bash
+sudo bbr3 --verify    # 完整验证报告
+sudo bbr3 --health    # 健康评分 (0-100)
+```
+
+验证项目：
+- 内核状态（BBR3 是否启用）
+- 拥塞控制算法
+- 队列调度规则
+- 缓冲区设置
+- TCP 参数
+- 系统服务状态
 
 ## 📝 常见问题
 
@@ -134,16 +211,49 @@ chmod +x pvetools.sh
 
 项目地址：[https://github.com/xx2468171796/pvetools](https://github.com/xx2468171796/pvetools)
 
-## 📞 联系方式
+---
 
-- **作者**：孤独制作
-- **电报群**：[https://t.me/+RZMe7fnvvUg1OWJl](https://t.me/+RZMe7fnvvUg1OWJl)
-- **GitHub**：[https://github.com/xx2468171796](https://github.com/xx2468171796)
+## 📞 联系方式 & 技术支持
 
-## ⭐ Star History
+<div align="center">
 
-如果这个项目对你有帮助，请给个 Star ⭐ 支持一下！
+### 🔥 加入我们的电报群，获取最新更新和技术支持！
+
+[![Telegram Group](https://img.shields.io/badge/Telegram-加入群组-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/+RZMe7fnvvUg1OWJl)
+
+</div>
+
+| 联系方式 | 链接 |
+|----------|------|
+| 👤 **作者** | 孤独制作 |
+| 📱 **电报群** | [https://t.me/+RZMe7fnvvUg1OWJl](https://t.me/+RZMe7fnvvUg1OWJl) |
+| 🐙 **GitHub** | [https://github.com/xx2468171796](https://github.com/xx2468171796) |
+| 📧 **问题反馈** | [GitHub Issues](https://github.com/xx2468171796/EasyBBR3/issues) |
+
+> 💡 **提示**：在电报群可以获得更快速的技术支持，以及第一时间获取脚本更新通知！
+
+---
+
+## ⭐ 支持项目
+
+如果这个项目对你有帮助，请给个 **Star ⭐** 支持一下！
+
+您的支持是我持续更新的动力！🙏
+
+[![Star History Chart](https://api.star-history.com/svg?repos=xx2468171796/EasyBBR3&type=Date)](https://star-history.com/#xx2468171796/EasyBBR3&Date)
+
+---
 
 ## 📄 License
 
 MIT License - 详见 [LICENSE](LICENSE) 文件
+
+---
+
+<div align="center">
+
+**Made with ❤️ by 孤独制作**
+
+[⬆ 回到顶部](#-easybbr3---bbr3-一键安装脚本)
+
+</div>
