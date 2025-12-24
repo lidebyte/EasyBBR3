@@ -67,7 +67,7 @@ chmod +x easybbr3.sh
 ### 安装快捷命令
 
 ```bash
-sudo ./easybbr3.sh --install
+./easybbr3.sh --install
 # 之后可直接使用 bbr3 命令
 bbr3
 ```
