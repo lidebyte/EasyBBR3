@@ -4566,37 +4566,39 @@ scene_config_menu() {
         print_separator
         echo
         echo -e "  ${GREEN}${BOLD}1)${NC} ${GREEN}🚀 代理智能调优${NC} - ${GREEN}推荐翻墙用户！10步向导，自动生成最优配置${NC}"
-        echo -e "  ${CYAN}2)${NC} 📋 查看当前优化  - 查看已应用的所有优化参数"
-        echo -e "  ${CYAN}3)${NC} ✅ 验证优化状态  - 检测优化是否生效"
-        echo -e "  ${CYAN}4)${NC} 🔄 恢复默认配置  - 恢复系统默认网络参数"
+        echo -e "  ${CYAN}2)${NC} ⚡ 智能自动优化  - 一键检测带宽/RTT并应用最优配置"
+        echo -e "  ${CYAN}3)${NC} 📋 查看当前优化  - 查看已应用的所有优化参数"
+        echo -e "  ${CYAN}4)${NC} ✅ 验证优化状态  - 检测优化是否生效"
+        echo -e "  ${CYAN}5)${NC} 🔄 恢复默认配置  - 恢复系统默认网络参数"
         echo
         print_separator
         echo -e "  ${DIM}以下为通用预设模式（非翻墙用途）:${NC}"
-        echo -e "  ${CYAN}5)${NC} 均衡模式    - 平衡延迟与吞吐量，适合一般用途"
-        echo -e "  ${CYAN}6)${NC} 通信模式    - 优化低延迟，适合实时通信/游戏"
-        echo -e "  ${CYAN}7)${NC} 视频模式    - 优化大文件传输，适合视频流/下载"
-        echo -e "  ${CYAN}8)${NC} 并发模式    - 优化高并发，适合 Web/API 服务器"
-        echo -e "  ${CYAN}9)${NC} 极速模式    - 最大化吞吐量，适合大带宽服务器"
-        echo -e "  ${CYAN}10)${NC} 性能模式   - 全面性能优化，适合高性能计算"
+        echo -e "  ${CYAN}6)${NC} 均衡模式    - 平衡延迟与吞吐量，适合一般用途"
+        echo -e "  ${CYAN}7)${NC} 通信模式    - 优化低延迟，适合实时通信/游戏"
+        echo -e "  ${CYAN}8)${NC} 视频模式    - 优化大文件传输，适合视频流/下载"
+        echo -e "  ${CYAN}9)${NC} 并发模式    - 优化高并发，适合 Web/API 服务器"
+        echo -e "  ${CYAN}10)${NC} 极速模式   - 最大化吞吐量，适合大带宽服务器"
+        echo -e "  ${CYAN}11)${NC} 性能模式   - 全面性能优化，适合高性能计算"
         echo
         echo -e "  ${CYAN}0)${NC} 返回主菜单"
         echo
         
-        read_choice "请选择场景模式" 10
+        read_choice "请选择场景模式" 11
         
         local selected_mode=""
         case "$MENU_CHOICE" in
             0) return ;;
             1) proxy_tune_wizard; continue ;;
-            2) show_current_optimization; continue ;;
-            3) show_verification_menu; continue ;;
-            4) restore_default_config; continue ;;
-            5) selected_mode="balanced" ;;
-            6) selected_mode="communication" ;;
-            7) selected_mode="video" ;;
-            8) selected_mode="concurrent" ;;
-            9) selected_mode="speed" ;;
-            10) selected_mode="performance" ;;
+            2) smart_auto_optimize; continue ;;
+            3) show_current_optimization; continue ;;
+            4) show_verification_menu; continue ;;
+            5) restore_default_config; continue ;;
+            6) selected_mode="balanced" ;;
+            7) selected_mode="communication" ;;
+            8) selected_mode="video" ;;
+            9) selected_mode="concurrent" ;;
+            10) selected_mode="speed" ;;
+            11) selected_mode="performance" ;;
             *) continue ;;
         esac
         
@@ -6524,9 +6526,8 @@ show_main_menu() {
         echo -e "${DIM}推荐场景: $(get_scene_name "$SCENE_RECOMMENDED")${NC}"
         echo
         print_menu "请选择操作" \
-            "智能自动优化 (一键检测带宽/RTT并应用最优配置) ⭐" \
+            "代理智能调优 (推荐翻墙用户！含一键自动优化) ⭐" \
             "安装新内核 (获取BBR3支持)" \
-            "场景配置 (按用途优化，推荐VPS代理使用)" \
             "验证优化状态 (检测优化是否生效)" \
             "查看当前状态" \
             "备份/恢复配置" \
@@ -6534,22 +6535,21 @@ show_main_menu() {
             "安装快捷命令 bbr3" \
             "PVE Tools 一键脚本"
         
-        read_choice "请选择" 9
+        read_choice "请选择" 8
         
         case "$MENU_CHOICE" in
             0) 
                 print_info "感谢使用，再见！"
                 exit 0
                 ;;
-            1) smart_auto_optimize ;;
+            1) scene_config_menu ;;
             2) show_kernel_menu ;;
-            3) scene_config_menu ;;
-            4) show_verification_menu ;;
-            5) show_status ;;
-            6) show_backup_menu ;;
-            7) do_uninstall ;;
-            8) install_shortcut ;;
-            9) run_pvetools ;;
+            3) show_verification_menu ;;
+            4) show_status ;;
+            5) show_backup_menu ;;
+            6) do_uninstall ;;
+            7) install_shortcut ;;
+            8) run_pvetools ;;
         esac
         
         echo
