@@ -3482,10 +3482,8 @@ EOF
         echo >> "$config_file"
     fi
     
-    # 高级优化
-    if [[ "$PROXY_ADVANCED_OPTS" == "all" ]]; then
-        get_advanced_sysctl_params >> "$config_file"
-    fi
+    # 高级优化（核心参数始终启用）
+    get_advanced_sysctl_params >> "$config_file"
 }
 
 # 显示优化方案
@@ -3529,23 +3527,24 @@ show_optimization_plan() {
     echo
     echo "    【TCP 优化】"
     echo "    ├─ TCP Fast Open:   启用 (TFO=3)"
-    if [[ "$PROXY_ADVANCED_OPTS" == "all" ]]; then
-        echo "    ├─ TCP ECN:         启用"
-        echo "    ├─ SACK/DSACK:      启用"
-    fi
+    echo "    ├─ TCP ECN:         启用"
+    echo "    ├─ SACK/DSACK:      启用"
     echo "    └─ 预计提升:        10-20% 延迟降低"
     echo
     
+    echo "    【高级网络优化】（始终启用）"
+    echo "    ├─ TCP 慢启动:      禁用空闲后重置，保持连接性能"
+    echo "    ├─ TCP Keepalive:   60秒探测，保持连接活跃"
+    echo "    ├─ 端口范围:        扩大到 1024-65535"
+    echo "    ├─ TIME_WAIT:       启用复用，限制数量"
+    echo "    ├─ SYN 队列:        扩大到 65535"
+    echo "    ├─ 连接跟踪:        优化 conntrack 表大小和超时"
+    echo "    ├─ 网络队列:        优化 netdev_budget"
+    echo "    ├─ 路由缓存:        扩大路由表容量"
+    echo "    └─ ARP 缓存:        扩大 neighbor 表容量"
+    echo
+    
     if [[ "$PROXY_ADVANCED_OPTS" == "all" ]]; then
-        echo "    【高级网络优化】"
-        echo "    ├─ TCP 慢启动:      禁用空闲后重置，保持连接性能"
-        echo "    ├─ 端口范围:        扩大到 1024-65535"
-        echo "    ├─ TIME_WAIT:       启用复用，限制数量"
-        echo "    ├─ SYN 队列:        扩大到 65535"
-        echo "    ├─ 连接跟踪:        优化 conntrack 表大小和超时"
-        echo "    ├─ 网络队列:        优化 netdev_budget"
-        echo "    └─ ARP 缓存:        扩大 neighbor 表容量"
-        echo
         echo "    【系统服务】"
         echo "    └─ haveged:         将安装并启用（增强熵源）"
         echo
