@@ -3406,14 +3406,26 @@ net.ipv4.tcp_sack = 1
 # 快速重传和恢复
 net.ipv4.tcp_early_retrans = 3
 net.ipv4.tcp_frto = 2
-net.ipv4.tcp_retries1 = 3
-net.ipv4.tcp_retries2 = 15
-net.ipv4.tcp_orphan_retries = 3
+net.ipv4.tcp_retries1 = 5
+net.ipv4.tcp_retries2 = 30
+net.ipv4.tcp_orphan_retries = 5
+net.ipv4.tcp_syn_retries = 6
+net.ipv4.tcp_synack_retries = 3
+net.ipv4.tcp_fin_timeout = 30
 
 # ========== Keepalive 优化（防止大文件传输中断）==========
-net.ipv4.tcp_keepalive_time = 30
-net.ipv4.tcp_keepalive_intvl = 5
-net.ipv4.tcp_keepalive_probes = 9
+net.ipv4.tcp_keepalive_time = 15
+net.ipv4.tcp_keepalive_intvl = 3
+net.ipv4.tcp_keepalive_probes = 15
+
+# ========== 防止 99% 失败（关键优化）==========
+# 增加 FIN 等待时间
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_tw_buckets = 262144
+# 禁用 RFC1337（允许 TIME_WAIT 状态的连接接收 RST）
+net.ipv4.tcp_rfc1337 = 0
+# 增加重传超时
+net.ipv4.tcp_retrans_collapse = 0
 
 # ========== conntrack 优化 ==========
 # UDP 短超时（通话连接快速清理）
