@@ -1909,8 +1909,17 @@ EOF
     if sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1; then
         print_success "智能优化配置已应用"
     else
-        print_warn "部分参数可能不被当前内核支持"
-        sysctl --system >/dev/null 2>&1 || true
+        # 逐行应用并统计
+        local applied=0 errors=0
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+            if sysctl -w "$line" >/dev/null 2>&1; then ((++applied)); else ((++errors)); fi
+        done < "$SYSCTL_FILE"
+        if [[ $errors -gt 0 ]]; then
+            print_info "已应用 ${applied} 项，${errors} 项不被当前内核支持（不影响核心功能）"
+        else
+            print_success "智能优化配置已应用"
+        fi
     fi
     
     # 启用 MSS Clamp
@@ -2418,29 +2427,27 @@ STD_CONF
     local sysctl_errors=0
     
     # 先尝试完整应用
+    local sysctl_applied=0
     if sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1; then
         print_success "配置已完整应用"
     else
         # 如果失败，逐行应用，跳过不支持的参数
-        print_warn "部分参数可能不被当前内核支持，正在逐行应用..."
-        
         while IFS= read -r line || [[ -n "$line" ]]; do
             # 跳过空行和注释
             [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
             
-            # 提取参数名
-            local param_name="${line%%=*}"
-            param_name="${param_name// /}"
-            
             # 尝试应用单个参数
-            if ! sysctl -w "$line" >/dev/null 2>&1; then
-                log_warn "参数不支持或无法设置: ${param_name}"
+            if sysctl -w "$line" >/dev/null 2>&1; then
+                ((++sysctl_applied))
+            else
                 ((++sysctl_errors))
             fi
         done < "$SYSCTL_FILE"
         
         if [[ $sysctl_errors -gt 0 ]]; then
-            print_warn "有 ${sysctl_errors} 个参数未能应用（可能不被当前内核支持）"
+            print_info "已应用 ${sysctl_applied} 项，${sysctl_errors} 项不被当前内核支持（不影响核心功能）"
+        else
+            print_success "配置已完整应用"
         fi
     fi
     
@@ -3294,10 +3301,23 @@ install_system_services() {
                         print_info "irqbalance 已在运行"
                     else
                         systemctl enable irqbalance >/dev/null 2>&1
+                        # 尝试启动，失败则重试一次
                         if systemctl start irqbalance >/dev/null 2>&1; then
                             print_success "irqbalance 已启动"
                         else
-                            print_warn "irqbalance 启动失败 (容器环境可能不支持)"
+                            sleep 1
+                            systemctl daemon-reload >/dev/null 2>&1
+                            if systemctl start irqbalance >/dev/null 2>&1; then
+                                print_success "irqbalance 已启动"
+                            else
+                                # 检查是否为容器或虚拟化环境
+                                if grep -qE '(docker|lxc|openvz|container)' /proc/1/cgroup 2>/dev/null || \
+                                   [[ -f /.dockerenv ]] || systemd-detect-virt -c -q 2>/dev/null; then
+                                    print_info "irqbalance 在容器环境中不可用（正常现象）"
+                                else
+                                    print_warn "irqbalance 启动失败，可手动执行: systemctl start irqbalance"
+                                fi
+                            fi
                         fi
                     fi
                 elif command -v irqbalance &>/dev/null; then
@@ -3307,10 +3327,11 @@ install_system_services() {
                     else
                         # 尝试 oneshot 模式或后台运行
                         irqbalance --oneshot >/dev/null 2>&1 || nohup irqbalance >/dev/null 2>&1 &
+                        sleep 0.5
                         if pgrep -x irqbalance >/dev/null 2>&1; then
                             print_success "irqbalance 已启动"
                         else
-                            print_warn "irqbalance 在此环境不可用 (容器限制)"
+                            print_info "irqbalance 在此环境不可用（正常现象，不影响 BBR 配置）"
                         fi
                     fi
                 else
@@ -3579,15 +3600,25 @@ execute_optimization() {
     
     # 步骤 4: 应用配置
     print_step "[4/5] 应用 sysctl 配置..."
+    local sysctl_errors=0
+    local sysctl_applied=0
     if sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1; then
         print_success "配置已应用"
     else
-        print_warn "部分参数可能不被当前内核支持"
-        # 逐行应用
+        # 逐行应用，统计成功/失败
         while IFS= read -r line || [[ -n "$line" ]]; do
             [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-            sysctl -w "$line" >/dev/null 2>&1 || true
+            if sysctl -w "$line" >/dev/null 2>&1; then
+                ((++sysctl_applied))
+            else
+                ((++sysctl_errors))
+            fi
         done < "$SYSCTL_FILE"
+        if [[ $sysctl_errors -gt 0 ]]; then
+            print_info "已应用 ${sysctl_applied} 项，${sysctl_errors} 项不被当前内核支持（不影响核心功能）"
+        else
+            print_success "配置已应用"
+        fi
     fi
     
     # 步骤 5: 验证
@@ -3607,8 +3638,21 @@ execute_optimization() {
     if [[ "$PROXY_ADVANCED_OPTS" == "all" ]]; then
         local irq_status="未运行"
         local haveged_status="未运行"
-        systemctl is-active irqbalance >/dev/null 2>&1 && irq_status="运行中"
-        systemctl is-active haveged >/dev/null 2>&1 && haveged_status="运行中"
+        # 检查 irqbalance 状态（兼容容器环境）
+        if systemctl is-active irqbalance >/dev/null 2>&1; then
+            irq_status="运行中"
+        elif pgrep -x irqbalance >/dev/null 2>&1; then
+            irq_status="运行中"
+        elif grep -qE '(docker|lxc|openvz|container)' /proc/1/cgroup 2>/dev/null || \
+             [[ -f /.dockerenv ]] || systemd-detect-virt -c -q 2>/dev/null; then
+            irq_status="容器环境不适用"
+        fi
+        # 检查 haveged 状态
+        if systemctl is-active haveged >/dev/null 2>&1; then
+            haveged_status="运行中"
+        elif pgrep -x haveged >/dev/null 2>&1; then
+            haveged_status="运行中"
+        fi
         printf "    %-15s : %s\n" "irqbalance" "$irq_status"
         printf "    %-15s : %s\n" "haveged" "$haveged_status"
     fi
