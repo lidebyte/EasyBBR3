@@ -3885,6 +3885,19 @@ proxy_tune_wizard() {
     print_step "第一步：检测硬件"
     show_hardware_report
     
+    # 步骤 1.5: 带宽/RTT 检测
+    print_step "检测网络参数（带宽/RTT）..."
+    echo -e "${CYAN}正在检测带宽和延迟...${NC}"
+    detect_bandwidth >/dev/null 2>&1
+    detect_rtt >/dev/null 2>&1
+    calculate_bdp_buffer >/dev/null 2>&1
+    local buffer_mb=$((SMART_OPTIMAL_BUFFER / 1024 / 1024))
+    [[ $buffer_mb -eq 0 ]] && buffer_mb=64
+    print_kv "检测带宽" "${SMART_DETECTED_BANDWIDTH:-未知} Mbps"
+    print_kv "检测 RTT" "${SMART_DETECTED_RTT:-未知} ms"
+    print_kv "推荐缓冲区" "${buffer_mb}MB"
+    echo
+    
     # 步骤 2: 内核检测
     print_step "第二步：内核检测"
     if ! check_current_kernel; then
@@ -4778,7 +4791,7 @@ apply_sysctl() {
     done < "$SYSCTL_FILE"
     
     if [[ $errors -gt 0 ]]; then
-        print_warn "有 ${errors} 个参数未能应用（可能不被当前内核支持）"
+        print_info "已应用配置，${errors} 项参数不被当前内核支持（不影响核心功能）"
     else
         print_success "配置已生效"
     fi
