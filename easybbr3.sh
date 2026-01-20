@@ -1408,7 +1408,12 @@ detect_server_resources() {
     fi
     
     # 当前 TCP 连接数
-    SERVER_TCP_CONNECTIONS=$(ss -t 2>/dev/null | wc -l || netstat -tn 2>/dev/null | wc -l || echo 0)
+    SERVER_TCP_CONNECTIONS=$(ss -t 2>/dev/null | wc -l)
+    if [[ -z "$SERVER_TCP_CONNECTIONS" ]] || ! [[ "$SERVER_TCP_CONNECTIONS" =~ ^[0-9]+$ ]]; then
+        SERVER_TCP_CONNECTIONS=$(netstat -tn 2>/dev/null | wc -l)
+    fi
+    SERVER_TCP_CONNECTIONS=${SERVER_TCP_CONNECTIONS:-0}
+    SERVER_TCP_CONNECTIONS=${SERVER_TCP_CONNECTIONS// /}
     # 减去标题行，使用安全的算术运算
     SERVER_TCP_CONNECTIONS=$((SERVER_TCP_CONNECTIONS > 0 ? SERVER_TCP_CONNECTIONS - 1 : 0))
 }
@@ -5900,7 +5905,9 @@ show_status() {
     # 备份信息
     if [[ -d "$BACKUP_DIR" ]]; then
         local backup_count
-        backup_count=$(ls -1 "${BACKUP_DIR}/"*.bak 2>/dev/null | wc -l || echo 0)
+        backup_count=$(ls -1 "${BACKUP_DIR}/"*.bak 2>/dev/null | wc -l)
+        backup_count=${backup_count:-0}
+        backup_count=${backup_count// /}
         if [[ $backup_count -gt 0 ]]; then
             echo -e "${BOLD}备份信息${NC}"
             print_kv "备份数量" "$backup_count"
