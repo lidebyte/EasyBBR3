@@ -3271,6 +3271,19 @@ net.ipv4.tcp_timestamps = 1
 net.core.busy_poll = 50
 net.core.busy_read = 50
 
+# TCP 初始窗口优化（减少首包延迟）
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_moderate_rcvbuf = 1
+
+# 端口范围和 TIME_WAIT 优化（高并发）
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_tw_buckets = 262144
+
+# SYN 队列优化（高并发连接）
+net.ipv4.tcp_max_syn_backlog = 65535
+net.core.somaxconn = 65535
+
 # 连接跟踪优化（高并发场景）
 net.netfilter.nf_conntrack_max = 1048576
 net.netfilter.nf_conntrack_tcp_timeout_established = 7200
@@ -3516,6 +3529,10 @@ show_optimization_plan() {
     
     if [[ "$PROXY_ADVANCED_OPTS" == "all" ]]; then
         echo "    【高级网络优化】"
+        echo "    ├─ TCP 慢启动:      禁用空闲后重置，保持连接性能"
+        echo "    ├─ 端口范围:        扩大到 1024-65535"
+        echo "    ├─ TIME_WAIT:       启用复用，限制数量"
+        echo "    ├─ SYN 队列:        扩大到 65535"
         echo "    ├─ 连接跟踪:        优化 conntrack 表大小和超时"
         echo "    ├─ 网络队列:        优化 netdev_budget"
         echo "    └─ ARP 缓存:        扩大 neighbor 表容量"
