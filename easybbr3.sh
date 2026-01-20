@@ -158,6 +158,16 @@ SERVER_BANDWIDTH_MBPS=0
 SERVER_TCP_CONNECTIONS=0
 
 #===============================================================================
+# 全局变量 - 智能优化
+#===============================================================================
+SMART_DETECTED_BANDWIDTH=0      # 实测带宽 (Mbps)
+SMART_DETECTED_RTT=0            # 检测的 RTT (ms)
+SMART_OPTIMAL_BUFFER=0          # 计算的最优缓冲区 (bytes)
+SMART_OPTIMAL_MTU=1500          # 检测的最优 MTU
+SMART_HARDWARE_SCORE=""         # 硬件评分: low/medium/high
+SMART_MSS_CLAMP_ENABLED=0       # MSS Clamp 是否启用
+
+#===============================================================================
 # 全局变量 - 镜像源
 #===============================================================================
 MIRROR_REGION=""  # cn/intl/auto
@@ -1416,6 +1426,348 @@ detect_server_resources() {
     SERVER_TCP_CONNECTIONS=${SERVER_TCP_CONNECTIONS// /}
     # 减去标题行，使用安全的算术运算
     SERVER_TCP_CONNECTIONS=$((SERVER_TCP_CONNECTIONS > 0 ? SERVER_TCP_CONNECTIONS - 1 : 0))
+}
+
+#===============================================================================
+# 智能优化模块
+#===============================================================================
+
+# 智能带宽检测 - 多级回退策略
+detect_bandwidth() {
+    log_info "正在检测服务器带宽..."
+    
+    local bandwidth=0
+    
+    # 方法1: 使用 speedtest-cli (最准确)
+    if command -v speedtest-cli >/dev/null 2>&1; then
+        log_debug "使用 speedtest-cli 检测..."
+        local result
+        result=$(speedtest-cli --simple 2>/dev/null | grep -i "upload" | awk '{print $2}')
+        if [[ -n "$result" ]] && [[ "$result" =~ ^[0-9.]+$ ]]; then
+            bandwidth=$(printf "%.0f" "$result")
+            log_info "speedtest-cli 检测带宽: ${bandwidth} Mbps"
+        fi
+    fi
+    
+    # 方法2: 使用 curl 下载测速 (回退)
+    if [[ $bandwidth -eq 0 ]]; then
+        log_debug "使用 curl 下载测速..."
+        local start_time end_time duration size_bytes
+        local test_url="https://speed.cloudflare.com/__down?bytes=10000000"
+        
+        start_time=$(date +%s.%N)
+        if curl -so /dev/null --max-time 10 "$test_url" 2>/dev/null; then
+            end_time=$(date +%s.%N)
+            duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "10")
+            if [[ -n "$duration" ]] && (( $(echo "$duration > 0" | bc -l 2>/dev/null || echo 0) )); then
+                bandwidth=$(echo "10 * 8 / $duration" | bc 2>/dev/null || echo "0")
+                bandwidth=${bandwidth:-0}
+                log_info "curl 测速带宽: ${bandwidth} Mbps"
+            fi
+        fi
+    fi
+    
+    # 方法3: 使用 ethtool 读取网卡速率 (最后回退)
+    if [[ $bandwidth -eq 0 ]]; then
+        log_debug "使用 ethtool 读取网卡速率..."
+        local nic
+        nic=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5; exit}')
+        if [[ -n "$nic" ]] && command -v ethtool >/dev/null 2>&1; then
+            bandwidth=$(ethtool "$nic" 2>/dev/null | awk -F': ' '/Speed:/{print $2}' | grep -oE '[0-9]+')
+            bandwidth=${bandwidth:-100}
+            log_warn "使用网卡速率估算: ${bandwidth} Mbps (可能不准确)"
+        else
+            bandwidth=100
+            log_warn "无法检测带宽，使用默认值: 100 Mbps"
+        fi
+    fi
+    
+    SMART_DETECTED_BANDWIDTH=$bandwidth
+    echo "$bandwidth"
+}
+
+# 检测 RTT
+detect_rtt() {
+    local target="${1:-8.8.8.8}"
+    log_debug "检测到 $target 的 RTT..."
+    
+    local rtt=100  # 默认值
+    
+    if command -v ping >/dev/null 2>&1; then
+        local ping_result
+        ping_result=$(ping -c 3 -W 2 "$target" 2>/dev/null | tail -1 | awk -F'/' '{print $5}')
+        if [[ -n "$ping_result" ]] && [[ "$ping_result" =~ ^[0-9.]+$ ]]; then
+            rtt=$(printf "%.0f" "$ping_result")
+        fi
+    fi
+    
+    SMART_DETECTED_RTT=$rtt
+    echo "$rtt"
+}
+
+# 根据 BDP 计算最优缓冲区
+calculate_bdp_buffer() {
+    local bandwidth_mbps="${1:-$SMART_DETECTED_BANDWIDTH}"
+    local rtt_ms="${2:-$SMART_DETECTED_RTT}"
+    
+    [[ $bandwidth_mbps -eq 0 ]] && bandwidth_mbps=100
+    [[ $rtt_ms -eq 0 ]] && rtt_ms=100
+    
+    # BDP = bandwidth (bits/s) * RTT (s) / 8 (转换为字节)
+    # bandwidth_mbps * 1000000 * rtt_ms / 1000 / 8 = bandwidth_mbps * rtt_ms * 125
+    local bdp_bytes=$((bandwidth_mbps * rtt_ms * 125))
+    
+    # 加上 25% 冗余
+    local buffer_bytes=$((bdp_bytes * 125 / 100))
+    
+    # 根据硬件评分调整上限
+    local max_buffer=134217728  # 128MB
+    local min_buffer=16777216   # 16MB
+    
+    case "${SMART_HARDWARE_SCORE:-medium}" in
+        low)
+            max_buffer=33554432   # 32MB
+            ;;
+        medium)
+            max_buffer=67108864   # 64MB
+            ;;
+        high)
+            max_buffer=134217728  # 128MB
+            ;;
+    esac
+    
+    # 限制范围
+    [[ $buffer_bytes -lt $min_buffer ]] && buffer_bytes=$min_buffer
+    [[ $buffer_bytes -gt $max_buffer ]] && buffer_bytes=$max_buffer
+    
+    SMART_OPTIMAL_BUFFER=$buffer_bytes
+    echo "$buffer_bytes"
+}
+
+# MTU 路径探测
+detect_optimal_mtu() {
+    local target="${1:-8.8.8.8}"
+    log_debug "探测到 $target 的最优 MTU..."
+    
+    local mtu=1500  # 默认值
+    local low=1200
+    local high=1500
+    
+    # 二分法探测
+    while [[ $low -lt $high ]]; do
+        local mid=$(( (low + high + 1) / 2 ))
+        local packet_size=$((mid - 28))  # 减去 IP + ICMP 头
+        
+        if ping -c 1 -W 1 -M do -s "$packet_size" "$target" >/dev/null 2>&1; then
+            low=$mid
+        else
+            high=$((mid - 1))
+        fi
+    done
+    
+    mtu=$low
+    SMART_OPTIMAL_MTU=$mtu
+    log_info "检测到最优 MTU: $mtu"
+    echo "$mtu"
+}
+
+# 硬件性能评估
+assess_hardware_score() {
+    detect_server_resources
+    
+    local score="medium"
+    
+    # 评分逻辑
+    if [[ $SERVER_CPU_CORES -le 1 ]] && [[ $SERVER_MEMORY_MB -lt 1024 ]]; then
+        score="low"
+    elif [[ $SERVER_CPU_CORES -gt 4 ]] || [[ $SERVER_MEMORY_MB -gt 4096 ]]; then
+        score="high"
+    else
+        score="medium"
+    fi
+    
+    SMART_HARDWARE_SCORE=$score
+    log_info "硬件评分: $score (CPU: ${SERVER_CPU_CORES}核, 内存: ${SERVER_MEMORY_MB}MB)"
+    echo "$score"
+}
+
+# 应用 MSS Clamp
+apply_mss_clamp() {
+    log_info "启用 MSS Clamp..."
+    
+    local nic
+    nic=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5; exit}')
+    
+    if [[ -z "$nic" ]]; then
+        log_warn "无法检测默认网卡，跳过 MSS Clamp"
+        return 1
+    fi
+    
+    # 检查是否已有规则
+    if iptables -t mangle -C POSTROUTING -o "$nic" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+        log_info "MSS Clamp 规则已存在"
+        SMART_MSS_CLAMP_ENABLED=1
+        return 0
+    fi
+    
+    # 添加规则
+    if iptables -t mangle -A POSTROUTING -o "$nic" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+        log_info "MSS Clamp 已启用 (网卡: $nic)"
+        SMART_MSS_CLAMP_ENABLED=1
+        
+        # 持久化规则
+        if command -v iptables-save >/dev/null 2>&1; then
+            iptables-save > /etc/iptables.rules 2>/dev/null || true
+        fi
+        return 0
+    else
+        log_warn "MSS Clamp 启用失败"
+        return 1
+    fi
+}
+
+# 移除 MSS Clamp
+remove_mss_clamp() {
+    log_info "移除 MSS Clamp..."
+    
+    local nic
+    nic=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5; exit}')
+    
+    if [[ -n "$nic" ]]; then
+        iptables -t mangle -D POSTROUTING -o "$nic" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    fi
+    
+    SMART_MSS_CLAMP_ENABLED=0
+    log_info "MSS Clamp 已移除"
+}
+
+# 智能自动优化 - 一键完成所有检测和配置
+smart_auto_optimize() {
+    print_header "智能自动优化"
+    
+    echo -e "${CYAN}正在进行智能检测...${NC}"
+    echo
+    
+    # 步骤1: 硬件评估
+    echo -e "${BOLD}[1/5] 硬件评估${NC}"
+    assess_hardware_score
+    print_kv "硬件评分" "$SMART_HARDWARE_SCORE"
+    print_kv "CPU 核心" "$SERVER_CPU_CORES"
+    print_kv "内存" "${SERVER_MEMORY_MB}MB"
+    echo
+    
+    # 步骤2: 带宽检测
+    echo -e "${BOLD}[2/5] 带宽检测${NC}"
+    detect_bandwidth >/dev/null
+    print_kv "检测带宽" "${SMART_DETECTED_BANDWIDTH} Mbps"
+    echo
+    
+    # 步骤3: RTT 检测
+    echo -e "${BOLD}[3/5] 延迟检测${NC}"
+    detect_rtt >/dev/null
+    print_kv "RTT 延迟" "${SMART_DETECTED_RTT} ms"
+    echo
+    
+    # 步骤4: 计算最优参数
+    echo -e "${BOLD}[4/5] 参数计算${NC}"
+    calculate_bdp_buffer >/dev/null
+    local buffer_mb=$((SMART_OPTIMAL_BUFFER / 1024 / 1024))
+    print_kv "最优缓冲区" "${buffer_mb}MB"
+    echo
+    
+    # 步骤5: MTU 检测
+    echo -e "${BOLD}[5/5] MTU 检测${NC}"
+    detect_optimal_mtu >/dev/null
+    print_kv "最优 MTU" "$SMART_OPTIMAL_MTU"
+    echo
+    
+    print_separator
+    echo
+    echo -e "${GREEN}${ICON_OK} 智能检测完成${NC}"
+    echo
+    echo -e "${BOLD}推荐配置:${NC}"
+    print_kv "缓冲区大小" "${buffer_mb}MB"
+    print_kv "tcp_notsent_lowat" "16384"
+    print_kv "tcp_mtu_probing" "1"
+    print_kv "MSS Clamp" "建议启用"
+    echo
+    
+    # 确认应用
+    if [[ $NON_INTERACTIVE -eq 0 ]]; then
+        echo -e "${YELLOW}是否应用这些优化配置？${NC}"
+        read -rp "[Y/n] " confirm
+        if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
+            apply_smart_config
+        else
+            print_info "已取消"
+        fi
+    else
+        apply_smart_config
+    fi
+}
+
+# 应用智能配置
+apply_smart_config() {
+    log_info "应用智能优化配置..."
+    
+    local buffer_bytes=$SMART_OPTIMAL_BUFFER
+    [[ $buffer_bytes -eq 0 ]] && buffer_bytes=67108864  # 默认 64MB
+    
+    # 生成配置
+    cat > "$SYSCTL_FILE" << EOF
+# EasyBBR3 智能优化配置
+# 生成时间: $(date)
+# 检测带宽: ${SMART_DETECTED_BANDWIDTH:-0} Mbps
+# 检测 RTT: ${SMART_DETECTED_RTT:-0} ms
+# 硬件评分: ${SMART_HARDWARE_SCORE:-medium}
+
+# 拥塞控制
+net.ipv4.tcp_congestion_control = bbr
+net.core.default_qdisc = fq
+
+# 智能计算的缓冲区
+net.core.rmem_max = $buffer_bytes
+net.core.wmem_max = $buffer_bytes
+net.ipv4.tcp_rmem = 4096 87380 $buffer_bytes
+net.ipv4.tcp_wmem = 4096 65536 $buffer_bytes
+
+# Reality/VLESS 优化
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_mtu_probing = 1
+
+# 代理优化参数
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 10
+
+# 连接队列
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 8192
+net.core.netdev_max_backlog = 5000
+
+# TCP 保活
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+
+# SYN 保护
+net.ipv4.tcp_syncookies = 1
+EOF
+    
+    # 应用配置
+    if sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1; then
+        print_success "智能优化配置已应用"
+    else
+        print_warn "部分参数可能不被当前内核支持"
+        sysctl --system >/dev/null 2>&1 || true
+    fi
+    
+    # 启用 MSS Clamp
+    apply_mss_clamp
+    
+    print_success "智能优化完成"
 }
 
 # 根据服务器资源推荐场景模式
@@ -3814,6 +4166,47 @@ get_health_rating() {
     fi
 }
 
+# 验证智能优化状态
+verify_smart_optimization() {
+    echo -e "  ${BOLD}智能优化验证${NC}"
+    print_separator
+    echo
+    
+    # 检查 MSS Clamp
+    local nic
+    nic=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5; exit}')
+    local mss_status="未启用"
+    if [[ -n "$nic" ]] && iptables -t mangle -C POSTROUTING -o "$nic" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+        mss_status="${GREEN}✅ 已启用${NC}"
+        SMART_MSS_CLAMP_ENABLED=1
+    else
+        mss_status="${YELLOW}⚠️ 未启用${NC}"
+    fi
+    printf "    %-25s : %b\n" "MSS Clamp" "$mss_status"
+    
+    # 检查 tcp_notsent_lowat
+    local notsent_lowat
+    notsent_lowat=$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo "-1")
+    if [[ "$notsent_lowat" == "16384" ]]; then
+        printf "    %-25s : ${GREEN}✅ %s${NC}\n" "tcp_notsent_lowat" "$notsent_lowat"
+    elif [[ "$notsent_lowat" != "-1" ]]; then
+        printf "    %-25s : ${YELLOW}⚠️ %s (推荐: 16384)${NC}\n" "tcp_notsent_lowat" "$notsent_lowat"
+    else
+        printf "    %-25s : ${DIM}不支持${NC}\n" "tcp_notsent_lowat"
+    fi
+    
+    # 检查 tcp_mtu_probing
+    local mtu_probing
+    mtu_probing=$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || echo "0")
+    if [[ "$mtu_probing" == "1" ]] || [[ "$mtu_probing" == "2" ]]; then
+        printf "    %-25s : ${GREEN}✅ 已启用${NC}\n" "MTU 探测"
+    else
+        printf "    %-25s : ${YELLOW}⚠️ 未启用${NC}\n" "MTU 探测"
+    fi
+    
+    echo
+}
+
 # 生成诊断报告
 generate_diagnostic_report() {
     # 重置状态
@@ -3838,6 +4231,7 @@ generate_diagnostic_report() {
     verify_system_services
     verify_network_interface
     check_config_integrity
+    verify_smart_optimization
     
     # 计算健康评分
     local health_score
@@ -5941,6 +6335,7 @@ show_main_menu() {
         echo -e "${DIM}推荐场景: $(get_scene_name "$SCENE_RECOMMENDED")${NC}"
         echo
         print_menu "请选择操作" \
+            "智能自动优化 (一键检测带宽/RTT并应用最优配置) ⭐" \
             "安装新内核 (获取BBR3支持)" \
             "场景配置 (按用途优化，推荐VPS代理使用)" \
             "验证优化状态 (检测优化是否生效)" \
@@ -5950,21 +6345,22 @@ show_main_menu() {
             "安装快捷命令 bbr3" \
             "PVE Tools 一键脚本"
         
-        read_choice "请选择" 8
+        read_choice "请选择" 9
         
         case "$MENU_CHOICE" in
             0) 
                 print_info "感谢使用，再见！"
                 exit 0
                 ;;
-            1) show_kernel_menu ;;
-            2) scene_config_menu ;;
-            3) show_verification_menu ;;
-            4) show_status ;;
-            5) show_backup_menu ;;
-            6) do_uninstall ;;
-            7) install_shortcut ;;
-            8) run_pvetools ;;
+            1) smart_auto_optimize ;;
+            2) show_kernel_menu ;;
+            3) scene_config_menu ;;
+            4) show_verification_menu ;;
+            5) show_status ;;
+            6) show_backup_menu ;;
+            7) do_uninstall ;;
+            8) install_shortcut ;;
+            9) run_pvetools ;;
         esac
         
         echo
@@ -6223,6 +6619,11 @@ ${BOLD}选项:${NC}
   ${CYAN}--check-bbr3${NC}            检测 BBR3 是否启用
   ${CYAN}--uninstall${NC}             卸载配置
   ${CYAN}--install${NC}               安装快捷命令 bbr3 到 /usr/local/bin
+  ${CYAN}--smart${NC}                 智能自动优化 (检测带宽/RTT/MTU 并应用最优配置)
+  ${CYAN}--detect${NC}                仅检测服务器参数，不应用配置
+  ${CYAN}--verify${NC}                验证优化效果
+  ${CYAN}--health${NC}                健康评分检查
+  ${CYAN}--proxy-tune${NC}            代理智能调优向导
   ${CYAN}--debug${NC}                 启用调试模式
   ${CYAN}--version, -v${NC}           显示版本号
   ${CYAN}--help, -h${NC}              显示帮助
@@ -6384,6 +6785,37 @@ main() {
                 detect_os
                 generate_diagnostic_report
                 exit $?
+                ;;
+            --detect)
+                # 仅检测不应用
+                print_logo
+                detect_os
+                echo -e "${CYAN}智能检测模式 (仅检测不应用)${NC}"
+                echo
+                assess_hardware_score >/dev/null
+                print_kv "硬件评分" "$SMART_HARDWARE_SCORE"
+                print_kv "CPU" "${SERVER_CPU_CORES} 核"
+                print_kv "内存" "${SERVER_MEMORY_MB} MB"
+                echo
+                detect_bandwidth >/dev/null
+                print_kv "检测带宽" "${SMART_DETECTED_BANDWIDTH} Mbps"
+                detect_rtt >/dev/null
+                print_kv "RTT 延迟" "${SMART_DETECTED_RTT} ms"
+                calculate_bdp_buffer >/dev/null
+                local buffer_mb=$((SMART_OPTIMAL_BUFFER / 1024 / 1024))
+                print_kv "推荐缓冲区" "${buffer_mb} MB"
+                detect_optimal_mtu >/dev/null
+                print_kv "最优 MTU" "$SMART_OPTIMAL_MTU"
+                exit 0
+                ;;
+            --smart)
+                # 智能自动优化
+                print_logo
+                detect_os
+                detect_arch
+                detect_virt
+                smart_auto_optimize
+                exit 0
                 ;;
             --health)
                 # 仅输出健康评分
