@@ -3270,6 +3270,22 @@ net.ipv4.tcp_fack = 1
 net.ipv4.tcp_timestamps = 1
 net.core.busy_poll = 50
 net.core.busy_read = 50
+
+# 连接跟踪优化（高并发场景）
+net.netfilter.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_tcp_timeout_established = 7200
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 15
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
+
+# 网络队列优化
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 8000
+
+# ARP 缓存优化
+net.ipv4.neigh.default.gc_thresh1 = 1024
+net.ipv4.neigh.default.gc_thresh2 = 4096
+net.ipv4.neigh.default.gc_thresh3 = 8192
 EOF
 }
 
@@ -3285,67 +3301,6 @@ install_system_services() {
     
     for service in "${services_to_install[@]}"; do
         case "$service" in
-            irqbalance)
-                # 检查是否为单核 CPU（irqbalance 在单核上无意义）
-                local cpu_count
-                cpu_count=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
-                if [[ $cpu_count -le 1 ]]; then
-                    print_info "irqbalance 在单核 CPU 上不需要，已跳过"
-                    continue
-                fi
-                
-                if ! command -v irqbalance &>/dev/null; then
-                    print_step "安装 irqbalance..."
-                    case "$PKG_MANAGER" in
-                        apt) apt-get install -y -qq irqbalance >/dev/null 2>&1 ;;
-                        yum) yum install -y -q irqbalance >/dev/null 2>&1 ;;
-                        dnf) dnf install -y -q irqbalance >/dev/null 2>&1 ;;
-                    esac
-                fi
-                
-                # 检查服务是否可用并启动
-                if [[ "$has_systemd" == "true" ]] && systemctl list-unit-files irqbalance.service &>/dev/null; then
-                    if systemctl is-active irqbalance >/dev/null 2>&1; then
-                        print_info "irqbalance 已在运行"
-                    else
-                        systemctl enable irqbalance >/dev/null 2>&1
-                        # 尝试启动，失败则重试一次
-                        if systemctl start irqbalance >/dev/null 2>&1; then
-                            print_success "irqbalance 已启动"
-                        else
-                            sleep 1
-                            systemctl daemon-reload >/dev/null 2>&1
-                            if systemctl start irqbalance >/dev/null 2>&1; then
-                                print_success "irqbalance 已启动"
-                            else
-                                # 检查是否为容器或虚拟化环境
-                                if grep -qE '(docker|lxc|openvz|container)' /proc/1/cgroup 2>/dev/null || \
-                                   [[ -f /.dockerenv ]] || systemd-detect-virt -c -q 2>/dev/null; then
-                                    print_info "irqbalance 在容器环境中不可用（正常现象）"
-                                else
-                                    print_warn "irqbalance 启动失败，可手动执行: systemctl start irqbalance"
-                                fi
-                            fi
-                        fi
-                    fi
-                elif command -v irqbalance &>/dev/null; then
-                    # 容器环境：尝试直接运行
-                    if pgrep -x irqbalance >/dev/null 2>&1; then
-                        print_info "irqbalance 已在运行"
-                    else
-                        # 尝试 oneshot 模式或后台运行
-                        irqbalance --oneshot >/dev/null 2>&1 || nohup irqbalance >/dev/null 2>&1 &
-                        sleep 0.5
-                        if pgrep -x irqbalance >/dev/null 2>&1; then
-                            print_success "irqbalance 已启动"
-                        else
-                            print_info "irqbalance 在此环境不可用（正常现象，不影响 BBR 配置）"
-                        fi
-                    fi
-                else
-                    print_warn "irqbalance 安装失败"
-                fi
-                ;;
             haveged)
                 if ! command -v haveged &>/dev/null; then
                     print_step "安装 haveged..."
@@ -3560,9 +3515,13 @@ show_optimization_plan() {
     echo
     
     if [[ "$PROXY_ADVANCED_OPTS" == "all" ]]; then
+        echo "    【高级网络优化】"
+        echo "    ├─ 连接跟踪:        优化 conntrack 表大小和超时"
+        echo "    ├─ 网络队列:        优化 netdev_budget"
+        echo "    └─ ARP 缓存:        扩大 neighbor 表容量"
+        echo
         echo "    【系统服务】"
-        echo "    ├─ irqbalance:      将安装并启用"
-        echo "    └─ haveged:         将安装并启用"
+        echo "    └─ haveged:         将安装并启用（增强熵源）"
         echo
     fi
     
@@ -3571,7 +3530,7 @@ show_optimization_plan() {
     print_separator
     echo "    1. 备份当前 sysctl 配置"
     echo "    2. 写入新的 sysctl 配置到 ${SYSCTL_FILE}"
-    [[ "$PROXY_ADVANCED_OPTS" == "all" ]] && echo "    3. 安装 irqbalance 和 haveged"
+    [[ "$PROXY_ADVANCED_OPTS" == "all" ]] && echo "    3. 安装 haveged（增强熵源）"
     echo "    4. 应用 sysctl 配置"
     echo "    5. 验证配置生效"
     echo
@@ -3601,7 +3560,7 @@ execute_optimization() {
     # 步骤 3: 安装系统服务
     if [[ "$PROXY_ADVANCED_OPTS" == "all" ]]; then
         print_step "[3/5] 安装系统服务..."
-        install_system_services "irqbalance" "haveged"
+        install_system_services "haveged"
     else
         print_info "[3/5] 跳过系统服务安装"
     fi
@@ -3644,29 +3603,13 @@ execute_optimization() {
     printf "    %-15s : %s\n" "队列调度" "$current_qdisc"
     
     if [[ "$PROXY_ADVANCED_OPTS" == "all" ]]; then
-        local irq_status="未运行"
         local haveged_status="未运行"
-        local cpu_count
-        cpu_count=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
-        
-        # 检查 irqbalance 状态（兼容容器/单核环境）
-        if systemctl is-active irqbalance >/dev/null 2>&1; then
-            irq_status="运行中"
-        elif pgrep -x irqbalance >/dev/null 2>&1; then
-            irq_status="运行中"
-        elif [[ $cpu_count -le 1 ]]; then
-            irq_status="单核CPU不需要"
-        elif grep -qE '(docker|lxc|openvz|container)' /proc/1/cgroup 2>/dev/null || \
-             [[ -f /.dockerenv ]] || systemd-detect-virt -c -q 2>/dev/null; then
-            irq_status="容器环境不适用"
-        fi
         # 检查 haveged 状态
         if systemctl is-active haveged >/dev/null 2>&1; then
             haveged_status="运行中"
         elif pgrep -x haveged >/dev/null 2>&1; then
             haveged_status="运行中"
         fi
-        printf "    %-15s : %s\n" "irqbalance" "$irq_status"
         printf "    %-15s : %s\n" "haveged" "$haveged_status"
     fi
     echo
@@ -3796,15 +3739,10 @@ show_current_optimization() {
     
     # 系统服务状态
     echo "    【系统服务】"
-    local irq_status="未安装"
     local haveged_status="未安装"
-    if command -v irqbalance &>/dev/null; then
-        systemctl is-active irqbalance >/dev/null 2>&1 && irq_status="运行中" || irq_status="已安装但未运行"
-    fi
     if command -v haveged &>/dev/null; then
         systemctl is-active haveged >/dev/null 2>&1 && haveged_status="运行中" || haveged_status="已安装但未运行"
     fi
-    printf "      %-20s : %s\n" "irqbalance" "$irq_status"
     printf "      %-20s : %s\n" "haveged" "$haveged_status"
     echo
     
@@ -3831,7 +3769,7 @@ restore_default_config() {
     echo "    1. 删除 BBR 优化配置文件"
     echo "    2. 删除代理调优配置文件"
     echo "    3. 恢复系统默认 sysctl 参数"
-    echo "    4. 停止并禁用 irqbalance/haveged（如果由脚本安装）"
+    echo "    4. 停止并禁用 haveged（如果由脚本安装）"
     echo
     
     if ! confirm "确认恢复默认配置？此操作不可撤销！" "n"; then
@@ -4238,34 +4176,20 @@ verify_system_services() {
     
     VERIFY_SERVICE_STATUS=0
     
-    # irqbalance
-    if command -v irqbalance &>/dev/null; then
-        if systemctl is-active irqbalance >/dev/null 2>&1; then
-            printf "    %-25s : ${GREEN}✅ 运行中${NC}\n" "irqbalance"
-            VERIFY_SERVICE_STATUS=$((VERIFY_SERVICE_STATUS + 50))
-        else
-            printf "    %-25s : ${YELLOW}⚠️ 已安装但未运行${NC}\n" "irqbalance"
-            VERIFY_SERVICE_STATUS=$((VERIFY_SERVICE_STATUS + 25))
-            VERIFY_ISSUES+=("irqbalance 未运行")
-            VERIFY_FIXES+=("运行 systemctl start irqbalance")
-        fi
-    else
-        printf "    %-25s : ${DIM}未安装${NC}\n" "irqbalance"
-    fi
-    
     # haveged
     if command -v haveged &>/dev/null; then
         if systemctl is-active haveged >/dev/null 2>&1; then
             printf "    %-25s : ${GREEN}✅ 运行中${NC}\n" "haveged"
-            VERIFY_SERVICE_STATUS=$((VERIFY_SERVICE_STATUS + 50))
+            VERIFY_SERVICE_STATUS=$((VERIFY_SERVICE_STATUS + 100))
         else
             printf "    %-25s : ${YELLOW}⚠️ 已安装但未运行${NC}\n" "haveged"
-            VERIFY_SERVICE_STATUS=$((VERIFY_SERVICE_STATUS + 25))
+            VERIFY_SERVICE_STATUS=$((VERIFY_SERVICE_STATUS + 50))
             VERIFY_ISSUES+=("haveged 未运行")
             VERIFY_FIXES+=("运行 systemctl start haveged")
         fi
     else
-        printf "    %-25s : ${DIM}未安装${NC}\n" "haveged"
+        printf "    %-25s : ${DIM}未安装（可选）${NC}\n" "haveged"
+        VERIFY_SERVICE_STATUS=100  # 未安装也不扣分
     fi
     echo
 }
