@@ -6543,12 +6543,13 @@ show_main_menu() {
             "验证优化状态 (检测优化是否生效)" \
             "查看当前状态" \
             "备份/恢复配置" \
+            "时间自动优化 (晚高峰自动切换激进模式)" \
             "卸载配置" \
             "安装快捷命令 bbr3" \
             "更新脚本 (从 GitHub 获取最新版本)" \
             "PVE Tools 一键脚本"
         
-        read_choice "请选择" 9
+        read_choice "请选择" 10
         
         case "$MENU_CHOICE" in
             0) 
@@ -6560,10 +6561,11 @@ show_main_menu() {
             3) show_verification_menu ;;
             4) show_status ;;
             5) show_backup_menu ;;
-            6) do_uninstall ;;
-            7) install_shortcut ;;
-            8) update_script ;;
-            9) run_pvetools ;;
+            6) setup_time_based_optimization ;;
+            7) do_uninstall ;;
+            8) install_shortcut ;;
+            9) update_script ;;
+            10) run_pvetools ;;
         esac
         
         echo
@@ -6738,6 +6740,106 @@ install_shortcut() {
         print_error "下载失败，请检查网络连接"
         return 1
     fi
+}
+
+# 时间自动优化 - 根据时段自动调整参数
+setup_time_based_optimization() {
+    print_header "时间自动优化"
+    
+    echo -e "${DIM}根据时段自动调整网络参数，晚高峰使用激进配置${NC}"
+    echo
+    echo "  【时段设置】"
+    echo "    晚高峰: 19:00 - 23:00 (激进模式)"
+    echo "    非高峰: 其他时间 (标准模式)"
+    echo
+    echo "  【激进模式参数】"
+    echo "    缓冲区: 128MB (翻倍)"
+    echo "    SYN 队列: 131072 (翻倍)"
+    echo "    somaxconn: 131072 (翻倍)"
+    echo
+    
+    if ! confirm "是否启用时间自动优化？" "y"; then
+        return
+    fi
+    
+    # 创建高峰模式配置
+    local peak_config="/etc/sysctl.d/99-bbr-peak.conf"
+    local normal_config="/etc/sysctl.d/99-bbr-normal.conf"
+    
+    # 生成高峰模式配置
+    cat > "$peak_config" << 'EOF'
+# BBR3 晚高峰模式 (19:00-23:00)
+# 自动生成，请勿手动修改
+
+# 大缓冲区（128MB）
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.ipv4.tcp_rmem = 4096 131072 134217728
+net.ipv4.tcp_wmem = 4096 131072 134217728
+
+# 高并发队列
+net.core.somaxconn = 131072
+net.ipv4.tcp_max_syn_backlog = 131072
+net.core.netdev_max_backlog = 500000
+EOF
+    print_success "高峰模式配置已生成: $peak_config"
+    
+    # 生成标准模式配置
+    cat > "$normal_config" << 'EOF'
+# BBR3 标准模式 (非高峰时段)
+# 自动生成，请勿手动修改
+
+# 标准缓冲区（64MB）
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+
+# 标准队列
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+net.core.netdev_max_backlog = 250000
+EOF
+    print_success "标准模式配置已生成: $normal_config"
+    
+    # 创建切换脚本
+    local switch_script="/usr/local/bin/bbr3-time-switch"
+    cat > "$switch_script" << 'SCRIPT'
+#!/bin/bash
+# BBR3 时间自动切换脚本
+HOUR=$(date +%H)
+if [[ $HOUR -ge 19 && $HOUR -lt 23 ]]; then
+    # 晚高峰模式
+    sysctl -p /etc/sysctl.d/99-bbr-peak.conf >/dev/null 2>&1
+    logger "BBR3: 切换到晚高峰模式"
+else
+    # 标准模式
+    sysctl -p /etc/sysctl.d/99-bbr-normal.conf >/dev/null 2>&1
+    logger "BBR3: 切换到标准模式"
+fi
+SCRIPT
+    chmod +x "$switch_script"
+    print_success "切换脚本已创建: $switch_script"
+    
+    # 添加 cron 任务
+    local cron_job="0 * * * * $switch_script"
+    if ! crontab -l 2>/dev/null | grep -q "bbr3-time-switch"; then
+        (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
+        print_success "Cron 任务已添加 (每小时检查一次)"
+    else
+        print_info "Cron 任务已存在"
+    fi
+    
+    # 立即执行一次
+    "$switch_script"
+    
+    echo
+    print_success "时间自动优化已启用！"
+    echo
+    echo -e "  ${BOLD}管理命令:${NC}"
+    echo "    查看日志: journalctl -t BBR3"
+    echo "    手动切换: $switch_script"
+    echo "    禁用: crontab -e 删除 bbr3-time-switch 行"
 }
 
 # 更新脚本
