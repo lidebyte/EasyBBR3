@@ -1,0 +1,21 @@
+# Logs and temporary files
+*.log
+*.bak
+*.tmp
+
+# Storage directory
+storage/
+
+# macOS
+.DS_Store
+
+# Vim swap files
+*.swp
+
+# Editor config directories
+.vscode/
+.idea/
+
+# Package files
+*.deb
+*.rpm
