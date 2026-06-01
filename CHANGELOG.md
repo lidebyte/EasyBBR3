@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.4.2] - 2026-06-01
+
+### Changed
+- **真 BBRv3 校验铁证化**：`kernel_has_bbr3` 改用 `tcp_bbr` 模块自报的 `version` 字段判定
+  （`modinfo tcp_bbr` → `version: 3`，对 builtin 模块同样有效），只有模块版本 ≥3 才认定为真 BBRv3。
+  这能可靠区分"真 BBRv3"与"被冒充的 BBR v1"，不再仅凭内核名是否含 xanmod 猜测。
+- `--check-bbr3` 增加 `BBR_MODULE_VERSION=N` 输出；验证报告显示"✅ 真 BBRv3 已启用 (tcp_bbr 模块 version=3)"。
+- 已在实机验证：XanMod `6.17.10-x64v3-xanmod1` → 模块 version=3 → 判定为真 BBRv3。
+
 ## [2.4.1] - 2026-06-01
 
 ### Changed
@@ -99,6 +108,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+[2.4.2]: https://github.com/xx2468171796/EasyBBR3/compare/v2.4.1...v2.4.2
 [2.4.1]: https://github.com/xx2468171796/EasyBBR3/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/xx2468171796/EasyBBR3/compare/v2.2.0...v2.4.0
 [2.2.0]: https://github.com/xx2468171796/EasyBBR3/compare/v2.1.0...v2.2.0

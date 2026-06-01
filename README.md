@@ -1,17 +1,18 @@
 # EasyBBR3
 
 > 一键安装 BBR/BBR2/BBR3 拥塞控制 + 全面网络调优脚本，适用于 Linux VPS。  
-> 作者：孤独制作 · v2.4.1 · MIT License
+> 作者：孤独制作 · v2.4.2 · MIT License
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.4.1-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.4.2-green.svg)](CHANGELOG.md)
 
 ---
 
-## ✨ 最近更新 (v2.4.1)
+## ✨ 最近更新 (v2.4.2)
 
 > 完整记录见 [CHANGELOG.md](CHANGELOG.md)。自 v2.2.0 起的一次全面维护，已在 Ubuntu 24.04 + XanMod 真机验证。
 
+- **真 BBRv3 铁证校验**（v2.4.2）：用 `tcp_bbr` 模块自报的 `version` 字段判定（`modinfo tcp_bbr` → `version: 3`），只有模块版本 ≥3 才认定为真 BBRv3，可靠区分"真 BBRv3"与"被冒充的 BBR v1"；`--check-bbr3` 会输出 `BBR_MODULE_VERSION`。
 - **内核只用 XanMod 且自动装最新版**（v2.4.1）：Debian/Ubuntu 一键安装/更新到最新 XanMod（按 CPU 自动选 x64v1/v2/v3），它是唯一提供 BBRv3 的内核。
 
 - **修复严重 Bug**：sysctl 配置加载顺序冲突（重启后调优被覆盖）、卸载残留、BusyBox 多值参数兼容、内核验证误判。
@@ -182,7 +183,10 @@ sudo bash easybbr3.sh --auto --non-interactive
 
 - **XanMod 内核**：将 Google 的 BBRv3 补丁以模块名 `bbr` 注册进内核。`--check-bbr3` 检测到 `BBR3_ACTIVE=YES` 时，说明您正在运行 XanMod 且 BBRv3 处于激活状态。
 - **Liquorix / ELRepo kernel-ml / Ubuntu HWE**：均为主线内核，内置的是 **BBRv1**，即使模块名也叫 `bbr`，实质上不是 BBRv3。
-- **如何确认**：安装 XanMod 内核后运行 `sudo bash easybbr3.sh --check-bbr3`，输出 `BBR3_ACTIVE=YES` 即为真正的 BBRv3。
+- **如何确认（铁证）**：运行 `sudo bash easybbr3.sh --check-bbr3`，看到 `BBR3_ACTIVE=YES` 且 `BBR_MODULE_VERSION=3` 即为真正的 BBRv3。也可手动验证：
+  ```bash
+  modinfo tcp_bbr | grep version   # 输出 version: 3 即为 BBRv3（主线内核为 v1 或无此字段）
+  ```
 
 ---
 

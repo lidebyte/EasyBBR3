@@ -12,7 +12,7 @@
 #       OPTIONS: --help 查看完整帮助
 #  REQUIREMENTS: root 权限, bash 4.0+
 #        AUTHOR: 孤独制作
-#       VERSION: 2.4.1
+#       VERSION: 2.4.2
 #       CREATED: 2024
 #      REVISION: 2026-05-19
 #       LICENSE: MIT
@@ -45,7 +45,7 @@ fi
 #===============================================================================
 # 版本信息
 #===============================================================================
-readonly SCRIPT_VERSION="2.4.1"
+readonly SCRIPT_VERSION="2.4.2"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]:-$0}")"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 readonly GITHUB_URL="https://github.com/xx2468171796"
@@ -5266,14 +5266,17 @@ verify_kernel_bbr3() {
         VERIFY_KERNEL_STATUS=100
     elif [[ "$current_algo" == "bbr" ]]; then
         # bbr 可能是 XanMod 内置的 BBRv3，也可能是主线内核的 BBR v1
+        # 用 tcp_bbr 模块自报版本号作铁证区分
+        local _bv
+        _bv=$(bbr_module_version)
         if kernel_has_bbr3; then
-            printf "    %-25s : ${GREEN}✅ BBRv3 已启用 (XanMod)${NC}\n" "拥塞控制"
+            printf "    %-25s : ${GREEN}✅ 真 BBRv3 已启用${NC} (tcp_bbr 模块 version=${_bv:-?})\n" "拥塞控制"
             VERIFY_KERNEL_STATUS=100
         else
             printf "    %-25s : ${YELLOW}⚠️ BBR v1 已启用 (主线内核，非 BBRv3)${NC}\n" "拥塞控制"
             VERIFY_KERNEL_STATUS=70
-            VERIFY_ISSUES+=("BBR 已启用但非 BBR3 版本")
-            VERIFY_FIXES+=("升级到 XanMod 内核以获得 BBRv3")
+            VERIFY_ISSUES+=("BBR 已启用但非 BBR3 版本 (模块 version=${_bv:-1})")
+            VERIFY_FIXES+=("安装 XanMod 内核以获得真正的 BBRv3")
         fi
     elif [[ "$bbr3_available" == "true" ]] || [[ "$bbr_available" == "true" ]]; then
         printf "    %-25s : ${YELLOW}⚠️ BBR 可用但未启用 (当前: $current_algo)${NC}\n" "拥塞控制"
@@ -5284,7 +5287,7 @@ verify_kernel_bbr3() {
         printf "    %-25s : ${RED}❌ BBR 不可用 (当前: $current_algo)${NC}\n" "拥塞控制"
         VERIFY_KERNEL_STATUS=0
         VERIFY_ISSUES+=("内核不支持 BBR")
-        VERIFY_FIXES+=("安装支持 BBR3 的内核 (XanMod/Liquorix/ELRepo)")
+        VERIFY_FIXES+=("安装 XanMod 内核 (唯一提供真正的 BBRv3)")
     fi
     
     # 显示可用算法
@@ -6264,17 +6267,27 @@ resolve_algo_value() {
     esac
 }
 
-# 判断当前运行内核是否真正支持 BBRv3
-# 主线内核（无论版本多高）只有 BBR v1；BBRv3 仅来自 XanMod 等打过补丁的内核。
+# 读取内核 BBR 模块自报的版本号（modinfo 对 builtin 模块同样有效）；读不到则为空。
+# 真 BBRv3 内核（如 XanMod）这里会返回 "3"；主线 BBR v1 无此字段或为 1。
+bbr_module_version() {
+    modinfo tcp_bbr 2>/dev/null | awk -F: '/^version:/{gsub(/[ \t]/,"",$2); print $2; exit}'
+}
+
+# 判断当前运行内核是否真正支持 BBRv3（用「铁证」而非内核名猜测）。
+# 优先依据 tcp_bbr 模块自报 version>=3——这能可靠区分真 BBRv3 与被冒充的 BBR v1。
 kernel_has_bbr3() {
-    local kver
-    kver=$(uname -r)
-    # 内核显式提供独立的 bbr3 算法名
+    # 1) 最硬证据：BBR 模块版本号 >= 3
+    local v
+    v=$(bbr_module_version)
+    if [[ "$v" =~ ^[0-9]+ ]] && [[ "${v%%.*}" -ge 3 ]]; then
+        return 0
+    fi
+    # 2) 内核显式提供独立的 bbr3 算法名
     if grep -qw "bbr3" /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
         return 0
     fi
-    # XanMod 内核内置 Google BBRv3（注册为 bbr）
-    if [[ "$kver" == *xanmod* ]]; then
+    # 3) 退路：XanMod 内核（其 bbr 即 Google BBRv3；用于 modinfo 不可用的极端情况）
+    if [[ "$(uname -r)" == *xanmod* ]]; then
         return 0
     fi
     return 1
@@ -9540,15 +9553,19 @@ main() {
         kver=$(uname -r | sed 's/[^0-9.].*$//')
         algo=$(get_current_algo)
         
+        local bbr_ver
+        bbr_ver=$(bbr_module_version)
         if [[ "$algo" == "bbr3" ]] || { [[ "$algo" == "bbr" ]] && kernel_has_bbr3; }; then
             echo "BBR3_ACTIVE=YES"
             echo "KERNEL=${kver}"
             echo "ALGO=${algo}"
+            echo "BBR_MODULE_VERSION=${bbr_ver:-unknown}"
             exit 0
         else
             echo "BBR3_ACTIVE=NO"
             echo "KERNEL=${kver}"
             echo "ALGO=${algo}"
+            echo "BBR_MODULE_VERSION=${bbr_ver:-unknown}"
             exit 1
         fi
     fi
