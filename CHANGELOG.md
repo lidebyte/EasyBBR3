@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - codename 默认值更新为 trixie / noble（无法解析时的合理回退）
 - BBR3 标注诚实化：内核菜单与状态明确区分 XanMod（真 BBRv3）与主线内核（仅 BBRv1）
 - `detect_cpu_level`：统一 x86-64-v2 判定基线为 SSE4.2（修正内联副本误用 AVX 的问题）
+- LINE 域名清单改为可由 `/etc/bbr3-line-domains.conf` 配置（不存在时用内置清单自动初始化，支持注释/增删），
+  满足 openspec 中"域名清单可配置"的需求（已实机验证）；并更新 openspec 验证勾选项
 - HWE 菜单：移除已 EOL 的 16.04/18.04，加入 26.04
 - 支持被 `source` 而不自动执行 `main`（便于测试与函数复用）
 - 修正 `usage()` 中错误的安装 URL（`bbr.sh` → `easybbr3.sh`）

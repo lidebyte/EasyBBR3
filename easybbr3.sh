@@ -3672,6 +3672,23 @@ readonly LINE_DOMAINS=(
 # LINE 配置文件路径（LINE_SYSCTL_FILE 已在顶部统一定义，使用 91- 前缀编码加载顺序）
 readonly LINE_CONFIG_FILE="/etc/bbr3-line.conf"
 readonly LINE_IP_FILE="/etc/bbr3-line-ips.conf"
+# 用户可编辑的 LINE 域名清单（不存在时用内置 LINE_DOMAINS 初始化）
+readonly LINE_DOMAINS_FILE="/etc/bbr3-line-domains.conf"
+
+# 返回 LINE 域名清单：优先读取用户可编辑的外部文件，不存在则用内置清单初始化该文件
+_line_get_domains() {
+    if [[ ! -f "$LINE_DOMAINS_FILE" ]]; then
+        {
+            printf '# LINE 域名清单（每行一个，# 开头为注释，可自行增删）\n'
+            printf '%s\n' "${LINE_DOMAINS[@]}"
+        } > "$LINE_DOMAINS_FILE" 2>/dev/null || true
+    fi
+    if [[ -f "$LINE_DOMAINS_FILE" ]]; then
+        grep -vE '^[[:space:]]*(#|$)' "$LINE_DOMAINS_FILE"
+    else
+        printf '%s\n' "${LINE_DOMAINS[@]}"
+    fi
+}
 
 # 获取 LINE 专用 sysctl 参数
 get_line_sysctl_params() {
@@ -3755,14 +3772,16 @@ line_dns_prefetch() {
     log_info "执行 LINE DNS 预解析..."
     
     local resolved_ips=""
-    for domain in "${LINE_DOMAINS[@]}"; do
+    local domain
+    while read -r domain; do
+        [[ -z "$domain" ]] && continue
         local ips
         ips=$(dig +short "$domain" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -5)
         if [[ -n "$ips" ]]; then
             resolved_ips+="$ips"$'\n'
             log_debug "解析 $domain: $(echo "$ips" | tr '\n' ' ')"
         fi
-    done
+    done < <(_line_get_domains)
     
     # 保存 IP 列表
     if [[ -n "$resolved_ips" ]]; then
@@ -4113,6 +4132,7 @@ line_remove_optimization() {
     print_step "移除 IP 列表..."
     rm -f "$LINE_IP_FILE"
     rm -f "$LINE_CONFIG_FILE"
+    rm -f "$LINE_DOMAINS_FILE"
     
     print_step "移除 QoS 规则..."
     iptables -t mangle -D POSTROUTING -j LINE_QOS 2>/dev/null
@@ -8957,7 +8977,7 @@ do_uninstall() {
     fi
 
     # 5. LINE / 应用 IP 列表与配置
-    rm -f "$LINE_IP_FILE" "$LINE_CONFIG_FILE"
+    rm -f "$LINE_IP_FILE" "$LINE_CONFIG_FILE" "$LINE_DOMAINS_FILE"
     rm -rf "$APP_IP_DIR"
 
     # 6. 重新加载系统配置

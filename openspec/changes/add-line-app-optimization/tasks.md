@@ -49,4 +49,4 @@
 - [x] 9.2 Verified separate config files for coexistence with proxy mode
 - [x] 9.3 Code review of DNS prefetch and TCP warmup functions
 - [x] 9.4 Code review of QoS and route optimization
-- [ ] 9.5 Manual validation on test VPS (pending user testing)
+- [x] 9.5 Manual validation on test VPS (Ubuntu 24.04 live box: domain list + sysctl apply verified)
