@@ -14,6 +14,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - 时段优化配置迁出 `/etc/sysctl.d`（改放 `/var/lib/easybbr3`），避免开机被 `sysctl --system` 无条件加载而强制进入某一模式；并增加 `@reboot` cron 保证开机即按时段生效
 - BusyBox sysctl 兼容：逐行应用时规范化 `key=val`，避免多值参数（tcp_rmem 等）在 BusyBox sysctl 上被整行拒绝而静默失效
 - 内核验证锚定匹配：GRUB 内核检测由裸子串匹配改为锚定 `vmlinuz-`/`kernel-` 路径，避免误报"验证通过"
+- APT 更新容错：`apt-get update` 因残留的第三方源（如旧 xanmod 源）报错时不再整体失败/中断主流程——
+  按"出错源位于哪个文件"区分基础系统源与第三方源：仅第三方源失败则警告并继续（交互模式可一键禁用），
+  基础系统源失败才停止并给出换源/检查网络的明确提示（已在 Ubuntu 24.04 实机验证两种情况）
 
 ### Security
 - XanMod 直接下载：传输改用 https，并依据仓库元数据对内核 `.deb` 做 SHA256 完整性校验后再 `dpkg -i`

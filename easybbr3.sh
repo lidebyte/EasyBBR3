@@ -989,24 +989,88 @@ precheck_disk() {
 }
 
 # 更新 APT 缓存（带缓存）
+# 关键：apt-get update 只要有任一源失败就返回非零，但若失败的只是第三方源
+# （如残留的 xanmod/docker 源），基础系统源其实已更新成功，不应阻断主流程。
+# 因此这里区分「基础系统源失败」与「仅第三方源失败」：
+#   - 基础源失败 → 明确提示用户换源/检查网络，并返回失败
+#   - 仅第三方源失败 → 列出有问题的源文件并继续（交互模式下可一键禁用）
 apt_update_cached() {
     local force="${1:-0}"
-    
+
     if [[ "$PKG_MANAGER" != "apt" ]]; then
         return 0
     fi
-    
+
     if [[ $force -eq 0 && $APT_UPDATE_DONE -eq 1 ]]; then
         log_debug "APT 缓存已更新，跳过"
         return 0
     fi
-    
-    if apt-get update -qq; then
+
+    local out rc
+    out=$(apt-get update 2>&1)
+    rc=$?
+    if [[ $rc -eq 0 ]]; then
         APT_UPDATE_DONE=1
         return 0
     fi
-    
-    return 1
+
+    # 更新失败：诊断出错的源主机
+    local err_hosts
+    err_hosts=$(echo "$out" | grep -iE 'Err:|^W:|^E:|Failed to fetch|no longer has a Release|Release file' \
+        | grep -oiE 'https?://[a-z0-9._-]+' | sed -E 's#https?://##' | sort -u)
+
+    # 基础系统源文件：传统 sources.list + deb822 权威 .sources（ubuntu/debian.sources）
+    # 按「出错源位于哪个文件」来判定基础源 vs 第三方源——比硬编码主机名白名单更可靠。
+    local base_files=("/etc/apt/sources.list")
+    local d822
+    d822=$(_apt_deb822_file 2>/dev/null) && base_files+=("$d822")
+
+    local f host2 base_failed=0 bad_files=()
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+        [[ -f "$f" ]] || continue
+        local matched=0
+        for host2 in $err_hosts; do
+            if grep -q "$host2" "$f" 2>/dev/null; then matched=1; break; fi
+        done
+        [[ $matched -eq 1 ]] || continue
+        local is_base=0 bf
+        for bf in "${base_files[@]}"; do
+            [[ "$f" == "$bf" ]] && is_base=1
+        done
+        if [[ $is_base -eq 1 ]]; then
+            base_failed=1
+        else
+            bad_files+=("$f")
+        fi
+    done
+
+    if [[ -z "$err_hosts" || $base_failed -eq 1 ]]; then
+        # 基础系统源出错（或无法判定具体源）：这是真正的问题，明确提示用户
+        print_error "APT 软件包缓存更新失败（基础系统源不可达）"
+        print_info  "请检查网络，或在主菜单/向导中切换软件源（官方 ↔ 国内镜像），相关报错："
+        echo "$out" | grep -iE 'Err:|^E:|Failed to fetch' | head -5 | sed 's/^/    /'
+        return 1
+    fi
+
+    # 仅第三方源失败：基础源已更新成功，列出问题源并继续
+    print_warn "部分第三方 APT 源更新失败（不影响基础系统源），可继续操作。问题源："
+    for f in "${bad_files[@]}"; do
+        print_warn "  • ${f}"
+    done
+
+    # 交互模式下提供一键禁用失效的第三方源
+    if [[ $NON_INTERACTIVE -eq 0 && ${#bad_files[@]} -gt 0 ]]; then
+        if confirm "是否临时禁用上述失效的第三方源（重命名为 .disabled）以消除报错？" "n"; then
+            for f in "${bad_files[@]}"; do
+                mv "$f" "${f}.disabled.$(date +%Y%m%d%H%M%S)" 2>/dev/null && print_success "已禁用: $f"
+            done
+            apt-get update -qq >/dev/null 2>&1 || true
+        fi
+    else
+        print_info "如需消除报错，可手动修正或删除上述源文件。本次继续使用可用的源。"
+    fi
+    APT_UPDATE_DONE=1
+    return 0
 }
 
 # 检测并安装依赖
