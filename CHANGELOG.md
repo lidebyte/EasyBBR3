@@ -6,7 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [2.3.0] - 2026-06-01
+## [2.4.0] - 2026-06-01
+
+> 自 v2.2.0 起的一次全面维护：修复会影响系统行为的严重 Bug、加固内核/脚本下载安全、
+> 适配 2026 年的发行版（deb822 / 新内核），并补齐文档与可配置项。全部改动已在
+> Ubuntu 24.04 + XanMod 真机验证。
 
 ### Fixed
 - **C1** sysctl 配置文件加载顺序冲突：配置改用 90–94 数字前缀编码加载优先级，确保附加优化（抗丢包/LINE/应用/qdisc）能正确覆盖基础配置；并新增 `migrate_legacy_configs` 自动迁移旧版 `99-*` 文件（已在 Ubuntu 24.04 实机验证）
@@ -86,7 +90,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-[2.3.0]: https://github.com/xx2468171796/EasyBBR3/compare/v2.2.0...v2.3.0
+[2.4.0]: https://github.com/xx2468171796/EasyBBR3/compare/v2.2.0...v2.4.0
 [2.2.0]: https://github.com/xx2468171796/EasyBBR3/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/xx2468171796/EasyBBR3/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/xx2468171796/EasyBBR3/releases/tag/v2.0.1

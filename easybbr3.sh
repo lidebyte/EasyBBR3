@@ -12,7 +12,7 @@
 #       OPTIONS: --help 查看完整帮助
 #  REQUIREMENTS: root 权限, bash 4.0+
 #        AUTHOR: 孤独制作
-#       VERSION: 2.3.0
+#       VERSION: 2.4.0
 #       CREATED: 2024
 #      REVISION: 2026-05-19
 #       LICENSE: MIT
@@ -45,7 +45,7 @@ fi
 #===============================================================================
 # 版本信息
 #===============================================================================
-readonly SCRIPT_VERSION="2.3.0"
+readonly SCRIPT_VERSION="2.4.0"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]:-$0}")"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 readonly GITHUB_URL="https://github.com/xx2468171796"

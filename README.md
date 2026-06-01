@@ -1,9 +1,23 @@
 # EasyBBR3
 
 > 一键安装 BBR/BBR2/BBR3 拥塞控制 + 全面网络调优脚本，适用于 Linux VPS。  
-> 作者：孤独制作 · v2.3.0 · MIT License
+> 作者：孤独制作 · v2.4.0 · MIT License
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-2.4.0-green.svg)](CHANGELOG.md)
+
+---
+
+## ✨ 最近更新 (v2.4.0)
+
+> 完整记录见 [CHANGELOG.md](CHANGELOG.md)。本次为自 v2.2.0 起的一次全面维护，已在 Ubuntu 24.04 + XanMod 真机验证。
+
+- **修复严重 Bug**：sysctl 配置加载顺序冲突（重启后调优被覆盖）、卸载残留、BusyBox 多值参数兼容、内核验证误判。
+- **安全加固**：XanMod 内核走 https 并校验 SHA256；移除裸 `curl | bash`；ELRepo 导入 GPG 公钥；临时文件用 `mktemp`。
+- **2026 兼容**：支持 Debian 13 / Ubuntu 24.04+ 的 deb822 `.sources` 换源；BBRv3 标注诚实化（仅 XanMod 提供 BBRv3）。
+- **更稳健**：第三方 APT 源损坏时不再中断主流程（明确提示，可一键禁用）；基础源故障才停止并提示换源。
+- **更灵活**：LINE 域名清单可通过 `/etc/bbr3-line-domains.conf` 自定义。
+- **文档**：重写本 README，新增 LICENSE / CHANGELOG / .gitignore / .gitattributes。
 
 ---
 
@@ -86,20 +100,37 @@ sudo bash easybbr3.sh
 ## 主菜单选项
 
 ```
-1. 安装/切换拥塞控制算法 (BBR/BBR2/BBR3)
-2. 安装内核 (XanMod/Liquorix/HWE/ELRepo)
-3. 代理智能调优向导
-4. 智能自动优化 / 场景预设
-5. 应用专项优化
-6. 抗丢包模式
-7. 队列规则切换 (qdisc)
-8. 时段自动优化
-9. 优化验证与健康评分
-10. 备份与恢复
-11. 卸载/回滚
-12. 脚本自更新
-13. PVE Tools
+1. 代理智能调优      (推荐翻墙用户！含 10 步向导 + 一键自动优化) ⭐
+2. 安装新内核        (XanMod 获取 BBRv3 / Liquorix·HWE·ELRepo 为 BBR v1)
+3. 验证优化状态      (检测优化是否生效 + 健康评分)
+4. 查看当前状态
+5. 备份 / 恢复配置
+6. 时间自动优化      (晚高峰 19:00–02:00 自动切换激进模式)
+7. 卸载配置          (彻底清理 sysctl / cron / systemd / iptables)
+8. 安装快捷命令 bbr3
+9. 更新脚本          (从 GitHub 获取最新版本)
+10. PVE Tools 一键脚本
 0. 退出
+```
+
+### 「1. 代理智能调优」进入的场景配置子菜单
+
+```
+1)  代理智能调优      10 步向导，自动生成最优代理/VPN 配置  ⭐
+2)  智能自动优化      检测带宽/RTT 并应用最优配置
+3)  查看当前优化
+4)  验证优化状态
+5)  恢复默认配置
+6)  均衡模式          平衡延迟与吞吐，适合一般用途
+7)  通信模式          低延迟，适合实时通信/游戏
+8)  视频模式          大文件传输，适合视频流/下载
+9)  并发模式          高并发，适合 Web/API 服务器
+10) 极速模式          最大化吞吐量，适合大带宽服务器
+11) 性能模式          全面性能优化
+12) 应用优化          LINE / Google / Apple / Meta / X / Telegram
+13) 抗丢包            中转机 / 高丢包环境专用
+14) 队列切换          fq / fq_codel / fq_pie / cake
+0)  返回主菜单
 ```
 
 ---
