@@ -12,7 +12,7 @@
 #       OPTIONS: --help 查看完整帮助
 #  REQUIREMENTS: root 权限, bash 4.0+
 #        AUTHOR: 孤独制作
-#       VERSION: 2.4.0
+#       VERSION: 2.4.1
 #       CREATED: 2024
 #      REVISION: 2026-05-19
 #       LICENSE: MIT
@@ -45,7 +45,7 @@ fi
 #===============================================================================
 # 版本信息
 #===============================================================================
-readonly SCRIPT_VERSION="2.4.0"
+readonly SCRIPT_VERSION="2.4.1"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]:-$0}")"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 readonly GITHUB_URL="https://github.com/xx2468171796"
@@ -8723,7 +8723,7 @@ show_main_menu() {
         echo
         print_menu "请选择操作" \
             "代理智能调优 (推荐翻墙用户！含一键自动优化) ⭐" \
-            "安装新内核 (XanMod 获取 BBRv3 / 其他为 BBR v1)" \
+            "安装 XanMod 内核 (自动安装最新版，获取 BBRv3) ⭐" \
             "验证优化状态 (检测优化是否生效)" \
             "查看当前状态" \
             "备份/恢复配置" \
@@ -8759,64 +8759,42 @@ show_main_menu() {
     done
 }
 
-# 内核安装菜单
+# 内核安装菜单（仅 XanMod —— 它是唯一提供 BBRv3 的内核；自动安装/更新到最新版）
 show_kernel_menu() {
-    print_header "安装新内核"
-    
+    print_header "安装 XanMod 内核"
+
     if ! is_kernel_install_supported; then
         print_warn "当前环境不支持安装第三方内核"
-        print_info "原因: 架构=${ARCH_ID}, 虚拟化=${VIRT_TYPE}"
+        print_info "原因: 架构=${ARCH_ID}, 虚拟化=${VIRT_TYPE}（容器无法更换宿主内核，仅支持 amd64）"
         return
     fi
-    
-    echo -e "${DIM}说明：BBRv3 目前仅由 XanMod 内核提供（注册为 bbr）；${NC}"
-    echo -e "${DIM}      Liquorix / HWE / ELRepo 均为主线内核，仅含 BBR v1。${NC}"
-    echo
-
-    local menu_items=()
 
     case "$DIST_ID" in
         debian|ubuntu)
-            menu_items+=("XanMod (推荐，唯一提供 BBRv3)")
-            menu_items+=("Liquorix (桌面优化，BBR v1)")
-            if [[ "$DIST_ID" == "ubuntu" ]] && [[ "$DIST_VER" =~ ^(20|22|24|26)\. ]]; then
-                menu_items+=("HWE 内核 (官方硬件支持，BBR v1)")
+            echo -e "${DIM}将自动从 XanMod 官方源安装/更新到【最新版】内核（提供 BBRv3，注册为 bbr）。${NC}"
+            echo -e "${DIM}会按 CPU 自动选择 x64v1/v2/v3 微架构版本；安装后需重启生效。${NC}"
+            echo
+            local cur_kernel
+            cur_kernel=$(uname -r)
+            if [[ "$cur_kernel" == *xanmod* ]]; then
+                print_info "当前已是 XanMod 内核（${cur_kernel}），继续将尝试更新到最新版。"
+            fi
+            print_warn "安装/更新内核是重要操作，可能影响系统启动。"
+            if ! confirm "确定要安装/更新到最新版 XanMod 内核吗？" "n"; then
+                print_info "已取消"
+                return
+            fi
+            install_kernel_xanmod && prompt_reboot
+            ;;
+        centos|rhel|rocky|almalinux)
+            print_warn "XanMod 仅提供 Debian/Ubuntu 软件包，不支持 RHEL/CentOS 系统。"
+            print_info "RHEL 系如需较新内核，可改用 ELRepo kernel-ml（主线内核，仅含 BBR v1，非 BBRv3）。"
+            if confirm "是否改为安装 ELRepo kernel-ml？" "n"; then
+                install_kernel_elrepo && prompt_reboot
             fi
             ;;
-        centos|rhel|rocky|almalinux)
-            menu_items+=("ELRepo kernel-ml (最新主线，BBR v1)")
-            ;;
-    esac
-    
-    if [[ ${#menu_items[@]} -eq 0 ]]; then
-        print_warn "当前系统没有可用的内核选项"
-        return
-    fi
-    
-    print_menu "选择要安装的内核" "${menu_items[@]}"
-    
-    read_choice "请选择" ${#menu_items[@]}
-    
-    [[ "$MENU_CHOICE" == "0" ]] && return
-    
-    # 二次确认
-    echo
-    print_warn "安装新内核是一个重要操作，可能影响系统启动"
-    if ! confirm "确定要继续吗？" "n"; then
-        print_info "已取消"
-        return
-    fi
-    
-    case "$DIST_ID" in
-        debian|ubuntu)
-            case "$MENU_CHOICE" in
-                1) install_kernel_xanmod && prompt_reboot ;;
-                2) install_kernel_liquorix && prompt_reboot ;;
-                3) install_kernel_hwe && prompt_reboot ;;
-            esac
-            ;;
-        centos|rhel|rocky|almalinux)
-            install_kernel_elrepo && prompt_reboot
+        *)
+            print_warn "当前系统 (${DIST_ID:-未知}) 没有可用的内核安装方式"
             ;;
     esac
 }

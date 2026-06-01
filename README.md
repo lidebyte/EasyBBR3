@@ -1,16 +1,18 @@
 # EasyBBR3
 
 > 一键安装 BBR/BBR2/BBR3 拥塞控制 + 全面网络调优脚本，适用于 Linux VPS。  
-> 作者：孤独制作 · v2.4.0 · MIT License
+> 作者：孤独制作 · v2.4.1 · MIT License
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.4.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.4.1-green.svg)](CHANGELOG.md)
 
 ---
 
-## ✨ 最近更新 (v2.4.0)
+## ✨ 最近更新 (v2.4.1)
 
-> 完整记录见 [CHANGELOG.md](CHANGELOG.md)。本次为自 v2.2.0 起的一次全面维护，已在 Ubuntu 24.04 + XanMod 真机验证。
+> 完整记录见 [CHANGELOG.md](CHANGELOG.md)。自 v2.2.0 起的一次全面维护，已在 Ubuntu 24.04 + XanMod 真机验证。
+
+- **内核只用 XanMod 且自动装最新版**（v2.4.1）：Debian/Ubuntu 一键安装/更新到最新 XanMod（按 CPU 自动选 x64v1/v2/v3），它是唯一提供 BBRv3 的内核。
 
 - **修复严重 Bug**：sysctl 配置加载顺序冲突（重启后调优被覆盖）、卸载残留、BusyBox 多值参数兼容、内核验证误判。
 - **安全加固**：XanMod 内核走 https 并校验 SHA256；移除裸 `curl | bash`；ELRepo 导入 GPG 公钥；临时文件用 `mktemp`。
@@ -56,7 +58,7 @@ sudo bash easybbr3.sh
 | 类别 | 功能 |
 |------|------|
 | 拥塞控制 | BBR / BBR2 / BBR3 安装与一键切换 |
-| 内核安装 | XanMod（真正的 BBRv3）、Liquorix、Ubuntu HWE、ELRepo kernel-ml |
+| 内核安装 | **XanMod（自动安装/更新到最新版，唯一提供 BBRv3）**；RHEL 系可选 ELRepo kernel-ml |
 | 代理调优向导 | 自动检测带宽 / RTT / MTU，生成最优 sysctl 配置 |
 | 智能自动优化 | 场景预设：balanced / communication / video / concurrent / speed / performance |
 | 应用专项优化 | LINE / Google / Apple / Meta / X (Twitter) / Telegram |
@@ -101,7 +103,7 @@ sudo bash easybbr3.sh
 
 ```
 1. 代理智能调优      (推荐翻墙用户！含 10 步向导 + 一键自动优化) ⭐
-2. 安装新内核        (XanMod 获取 BBRv3 / Liquorix·HWE·ELRepo 为 BBR v1)
+2. 安装 XanMod 内核   (自动安装/更新到最新版，获取 BBRv3)
 3. 验证优化状态      (检测优化是否生效 + 健康评分)
 4. 查看当前状态
 5. 备份 / 恢复配置

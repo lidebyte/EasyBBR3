@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.4.1] - 2026-06-01
+
+### Changed
+- 内核安装简化为**仅 XanMod**（它是唯一提供 BBRv3 的内核）：Debian/Ubuntu 直接安装/更新到
+  **最新版** XanMod（按 CPU 自动选 x64v1/v2/v3），不再在菜单里列 Liquorix/HWE；已是 XanMod
+  时会提示"继续将更新到最新版"。
+- RHEL/CentOS 系明确提示 XanMod 不支持，并可选改用 ELRepo kernel-ml（仍保留，CLI `--install-kernel`
+  也仍支持 liquorix/hwe/elrepo）。
+
 ## [2.4.0] - 2026-06-01
 
 > 自 v2.2.0 起的一次全面维护：修复会影响系统行为的严重 Bug、加固内核/脚本下载安全、
@@ -90,6 +99,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+[2.4.1]: https://github.com/xx2468171796/EasyBBR3/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/xx2468171796/EasyBBR3/compare/v2.2.0...v2.4.0
 [2.2.0]: https://github.com/xx2468171796/EasyBBR3/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/xx2468171796/EasyBBR3/compare/v2.0.1...v2.1.0
