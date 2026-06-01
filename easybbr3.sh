@@ -12,7 +12,7 @@
 #       OPTIONS: --help 查看完整帮助
 #  REQUIREMENTS: root 权限, bash 4.0+
 #        AUTHOR: 孤独制作
-#       VERSION: 2.0.1
+#       VERSION: 2.3.0
 #       CREATED: 2024
 #      REVISION: 2026-05-19
 #       LICENSE: MIT
@@ -45,7 +45,7 @@ fi
 #===============================================================================
 # 版本信息
 #===============================================================================
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.3.0"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]:-$0}")"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 readonly GITHUB_URL="https://github.com/xx2468171796"
@@ -95,11 +95,26 @@ readonly ICON_CPU="🖥"
 #===============================================================================
 # 配置文件路径
 #===============================================================================
-readonly SYSCTL_FILE="/etc/sysctl.d/99-bbr.conf"
+# sysctl.d 配置文件采用数字前缀编码加载优先级。
+# sysctl --system 按文件名字典序加载，后加载者覆盖先加载者中的重叠键。
+# 基础配置(90)优先级最低，各项附加优化(91-94)依次覆盖基础配置。
+# 旧版统一使用 99-* 前缀，导致 99-bbr.conf 反而排在 99-bbr-*.conf 之后最后加载，
+# 把抗丢包/LINE 等附加优化静默覆盖掉（见 migrate_legacy_configs 自动迁移旧文件）。
+readonly SYSCTL_FILE="/etc/sysctl.d/90-bbr.conf"
+readonly LINE_SYSCTL_FILE="/etc/sysctl.d/91-bbr-line.conf"
+readonly APP_SYSCTL_FILE="/etc/sysctl.d/92-bbr-apps.conf"
+readonly ANTI_LOSS_SYSCTL_FILE="/etc/sysctl.d/93-bbr-anti-loss.conf"
+readonly QDISC_SYSCTL_FILE="/etc/sysctl.d/94-bbr-qdisc.conf"
 readonly BACKUP_DIR="/etc/sysctl.d/bbr-backups"
 readonly LOG_FILE="/var/log/bbr3-script.log"
 readonly LOG_MAX_SIZE=1048576  # 1MB
+readonly STATE_DIR="/var/lib/easybbr3"
 readonly KERNEL_PENDING_FILE="/var/lib/easybbr3/kernel-pending"
+# 时段优化配置放在 /var/lib 而非 /etc/sysctl.d：
+# 否则 sysctl --system 会在每次开机无条件加载，导致无论几点都被强制进入某一模式。
+readonly PEAK_CONFIG_FILE="/var/lib/easybbr3/peak.conf"
+readonly NORMAL_CONFIG_FILE="/var/lib/easybbr3/normal.conf"
+readonly TIME_SWITCH_SCRIPT="/usr/local/bin/bbr3-time-switch"
 readonly SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main/easybbr3.sh"
 
 #===============================================================================
@@ -762,6 +777,7 @@ is_supported_rhel() {
     
     local ver="${DIST_VER%%.*}"
     case "$ver" in
+        # CentOS 7/8 已 EOL（仅尽力支持，base 源需 vault），RHEL 系主力为 8/9/10
         7|8|9|10) return 0 ;;
         *) return 1 ;;
     esac
@@ -1194,30 +1210,8 @@ fix_apt_source() {
             return 1
         fi
 
-        # Debian 12+ 使用 non-free-firmware 组件
-        local debian_nonfree="non-free"
-        case "$codename" in
-            bookworm|trixie|forky)
-                debian_nonfree="non-free-firmware"
-                ;;
-        esac
-
-        case "$DIST_ID" in
-            debian)
-                cat > /etc/apt/sources.list << EOF
-deb https://mirrors.tuna.tsinghua.edu.cn/debian/ ${codename} main contrib ${debian_nonfree}
-deb https://mirrors.tuna.tsinghua.edu.cn/debian/ ${codename}-updates main contrib ${debian_nonfree}
-deb https://mirrors.tuna.tsinghua.edu.cn/debian-security ${codename}-security main contrib ${debian_nonfree}
-EOF
-                ;;
-            ubuntu)
-                cat > /etc/apt/sources.list << EOF
-deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename} main restricted universe multiverse
-deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-updates main restricted universe multiverse
-deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ ${codename}-security main restricted universe multiverse
-EOF
-                ;;
-        esac
+        # 通过统一写入函数处理，自动适配 deb822(.sources) 与传统格式，避免重复源
+        apply_apt_sources china
     fi
     
     # 重新更新
@@ -1225,7 +1219,12 @@ EOF
     apt_output=$(apt-get update -qq 2>&1)
     if echo "$apt_output" | grep -qE '(Failed|Error)'; then
         log_warn "修复后仍有问题，恢复原配置"
-        [[ -f "$backup_file" ]] && cp "$backup_file" /etc/apt/sources.list
+        # 优先回滚 apply_apt_sources 实际改动的文件（兼容 deb822）；否则回滚 sources.list 备份
+        if [[ -n "$_APT_SRC_TARGET" ]]; then
+            _restore_apt_sources
+        elif [[ -f "$backup_file" ]]; then
+            cp "$backup_file" /etc/apt/sources.list
+        fi
         return 1
     fi
     APT_UPDATE_DONE=1
@@ -1470,7 +1469,7 @@ backup_config() {
     if [[ -f "$SYSCTL_FILE" ]]; then
         local timestamp
         timestamp=$(date '+%Y%m%d_%H%M%S')
-        local backup_file="${BACKUP_DIR}/99-bbr.conf.${timestamp}.bak"
+        local backup_file="${BACKUP_DIR}/$(basename "$SYSCTL_FILE").${timestamp}.bak"
         
         cp "$SYSCTL_FILE" "$backup_file"
         log_info "配置已备份到: ${backup_file}"
@@ -1959,7 +1958,7 @@ EOF
         local applied=0 errors=0
         while IFS= read -r line || [[ -n "$line" ]]; do
             [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-            if sysctl -w "$line" >/dev/null 2>&1; then ((++applied)); else ((++errors)); fi
+            if _sysctl_apply_line "$line"; then ((++applied)); else ((++errors)); fi
         done < "$SYSCTL_FILE"
         if [[ $errors -gt 0 ]]; then
             print_info "已应用 ${applied} 项，${errors} 项不被当前内核支持（不影响核心功能）"
@@ -2506,7 +2505,7 @@ STD_CONF
             [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
             
             # 尝试应用单个参数
-            if sysctl -w "$line" >/dev/null 2>&1; then
+            if _sysctl_apply_line "$line"; then
                 ((++sysctl_applied))
             else
                 ((++sysctl_errors))
@@ -2840,16 +2839,26 @@ install_nexttrace() {
     esac
     
     local url="https://github.com/nxtrace/NTrace-core/releases/latest/download/nexttrace_linux_${arch}"
-    
-    if curl -sL --max-time 30 "$url" -o /tmp/nexttrace 2>/dev/null; then
-        chmod +x /tmp/nexttrace
-        mv /tmp/nexttrace /usr/local/bin/nexttrace 2>/dev/null || mv /tmp/nexttrace /usr/bin/nexttrace
-        if check_nexttrace; then
-            print_success "nexttrace 安装成功"
-            return 0
+
+    # 使用 mktemp 避免 /tmp 固定路径的符号链接竞争
+    local tmp_bin
+    tmp_bin=$(mktemp /tmp/nexttrace.XXXXXX 2>/dev/null) || tmp_bin="/tmp/nexttrace.$$"
+    if curl -fsSL --max-time 60 "$url" -o "$tmp_bin" 2>/dev/null && [[ -s "$tmp_bin" ]]; then
+        # 校验下载内容确为 ELF 可执行文件（防止把 HTML 错误页/损坏文件装成可执行程序）
+        if [[ "$(head -c 4 "$tmp_bin" 2>/dev/null)" == $'\x7fELF' ]]; then
+            chmod +x "$tmp_bin"
+            if mv "$tmp_bin" /usr/local/bin/nexttrace 2>/dev/null || mv "$tmp_bin" /usr/bin/nexttrace 2>/dev/null; then
+                if check_nexttrace; then
+                    print_success "nexttrace 安装成功"
+                    return 0
+                fi
+            fi
+        else
+            print_warn "下载的 nexttrace 不是有效的可执行文件，已丢弃"
         fi
     fi
-    
+    rm -f "$tmp_bin" 2>/dev/null
+
     print_warn "nexttrace 安装失败，将使用备用方法"
     return 1
 }
@@ -3480,8 +3489,8 @@ apply_anti_loss_optimization() {
     # 备份当前配置
     backup_config
     
-    # 生成配置文件
-    local anti_loss_file="/etc/sysctl.d/99-bbr-anti-loss.conf"
+    # 生成配置文件（93- 前缀，加载顺序晚于基础配置，确保覆盖生效）
+    local anti_loss_file="$ANTI_LOSS_SYSCTL_FILE"
     
     cat > "$anti_loss_file" << CONF
 # BBR3 抗丢包优化配置
@@ -3497,7 +3506,7 @@ CONF
     local applied=0 errors=0
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-        if sysctl -w "$line" >/dev/null 2>&1; then
+        if _sysctl_apply_line "$line"; then
             ((++applied))
         else
             ((++errors))
@@ -3596,10 +3605,9 @@ readonly LINE_DOMAINS=(
     "manager.line.biz"
 )
 
-# LINE 配置文件路径
+# LINE 配置文件路径（LINE_SYSCTL_FILE 已在顶部统一定义，使用 91- 前缀编码加载顺序）
 readonly LINE_CONFIG_FILE="/etc/bbr3-line.conf"
 readonly LINE_IP_FILE="/etc/bbr3-line-ips.conf"
-readonly LINE_SYSCTL_FILE="/etc/sysctl.d/99-bbr-line.conf"
 
 # 获取 LINE 专用 sysctl 参数
 get_line_sysctl_params() {
@@ -4002,7 +4010,7 @@ CONF
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
             [[ "$line" =~ ^# ]] && continue
-            sysctl -w "$line" >/dev/null 2>&1 || true
+            _sysctl_apply_line "$line" || true
         done < "$LINE_SYSCTL_FILE"
         print_success "LINE sysctl 参数已应用（部分参数可能不支持）"
     fi
@@ -4206,9 +4214,8 @@ readonly TELEGRAM_DOMAINS=(
     "flora.web.telegram.org"
 )
 
-# 应用优化配置文件路径
+# 应用优化配置文件路径（APP_SYSCTL_FILE 已在顶部统一定义，使用 92- 前缀编码加载顺序）
 readonly APP_IP_DIR="/etc/bbr3-apps"
-readonly APP_SYSCTL_FILE="/etc/sysctl.d/99-bbr-apps.conf"
 
 # 通用应用 DNS 预解析
 app_dns_prefetch() {
@@ -4755,7 +4762,7 @@ execute_optimization() {
         # 逐行应用，统计成功/失败
         while IFS= read -r line || [[ -n "$line" ]]; do
             [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-            if sysctl -w "$line" >/dev/null 2>&1; then
+            if _sysctl_apply_line "$line"; then
                 ((++sysctl_applied))
             else
                 ((++sysctl_errors))
@@ -4963,7 +4970,7 @@ restore_default_config() {
     echo
     print_step "[1/4] 备份当前配置..."
     if [[ -f "$SYSCTL_FILE" ]]; then
-        local backup_file="${BACKUP_DIR}/99-bbr.conf.restore.$(date +%Y%m%d%H%M%S)"
+        local backup_file="${BACKUP_DIR}/$(basename "$SYSCTL_FILE").restore.$(date +%Y%m%d%H%M%S)"
         mkdir -p "$BACKUP_DIR"
         cp "$SYSCTL_FILE" "$backup_file"
         print_success "配置已备份到: $backup_file"
@@ -5911,6 +5918,19 @@ repair_sysctl_config() {
 }
 
 # 写入 sysctl 配置
+# 应用单行 sysctl 配置，兼容 BusyBox sysctl(Alpine/容器)。
+# procps sysctl 容忍 "key = a b c" 写法，但 BusyBox 会把多值参数(tcp_rmem 等)整行判为非法并跳过，
+# 导致缓冲区参数静默不生效。这里规范化为 "key=val"（去除 key 两端及 val 前导空白，保留 val 内部空格）。
+_sysctl_apply_line() {
+    local line="$1" key val
+    key="${line%%=*}"
+    val="${line#*=}"
+    key="${key//[[:space:]]/}"
+    val="${val#"${val%%[![:space:]]*}"}"
+    [[ -z "$key" ]] && return 0
+    sysctl -w "${key}=${val}" >/dev/null 2>&1
+}
+
 write_sysctl() {
     local algo="$1"
     local qdisc="$2"
@@ -5982,7 +6002,7 @@ apply_sysctl() {
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         
         # 尝试应用单个参数
-        if ! sysctl -w "$line" >/dev/null 2>&1; then
+        if ! _sysctl_apply_line "$line"; then
             ((++errors))
         fi
     done < "$SYSCTL_FILE"
@@ -6403,8 +6423,8 @@ apply_qdisc_to_system() {
     print_step "设置默认队列规则为 ${qdisc}..."
     
     if sysctl -w "net.core.default_qdisc=$qdisc" >/dev/null 2>&1; then
-        # 持久化到配置文件
-        local qdisc_conf="/etc/sysctl.d/99-bbr-qdisc.conf"
+        # 持久化到配置文件（94- 前缀，最后加载，确保覆盖基础配置中的 default_qdisc）
+        local qdisc_conf="$QDISC_SYSCTL_FILE"
         cat > "$qdisc_conf" << CONF
 # BBR3 队列调度配置
 # 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
@@ -6776,54 +6796,119 @@ select_best_mirror() {
 #===============================================================================
 
 # 切换 APT 源到官方源
-switch_to_official_apt_sources() {
-    local sources_file="/etc/apt/sources.list"
-    local backup_file="/etc/apt/sources.list.bak.$(date +%Y%m%d%H%M%S)"
-    
-    print_step "检测到系统使用国内镜像源，正在切换到官方源..."
-    
-    # 备份当前源
-    cp "$sources_file" "$backup_file"
-    print_info "已备份原源配置到: $backup_file"
-    
-    # 根据发行版生成官方源
+# 检测系统是否使用 deb822 (.sources) 格式的 APT 源（Debian 13 Trixie / Ubuntu 24.04+）。
+# 命中则 echo 权威 .sources 文件路径并返回 0，否则返回 1。
+_apt_deb822_file() {
+    local f
+    for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/debian.sources; do
+        [[ -f "$f" ]] && grep -q '^Types:' "$f" 2>/dev/null && { echo "$f"; return 0; }
+    done
+    return 1
+}
+
+# 供失败回滚使用的全局变量（记录最近一次重写的源文件及其备份）
+_APT_SRC_TARGET=""
+_APT_SRC_BACKUP=""
+
+# 统一写入 APT 源，自动适配 deb822(.sources) 与传统 one-line 格式。
+# 参数: $1 = official | china
+apply_apt_sources() {
+    local mode="$1"
+    local mirror_url="${MIRROR_URL:-https://mirrors.tuna.tsinghua.edu.cn}"
+    local deb822
+    deb822=$(_apt_deb822_file 2>/dev/null) || deb822=""
+
+    local codename comps base_uri sec_uri suites sec_suite
+    codename="${DIST_CODENAME:-$(lsb_release -sc 2>/dev/null || true)}"
     case "$DIST_ID" in
         debian)
-            local codename="${DIST_CODENAME:-bookworm}"
-            cat > "$sources_file" << EOF
-# Debian Official Sources - Generated by BBR3 Script
-deb http://deb.debian.org/debian ${codename} main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian ${codename}-updates main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian-security ${codename}-security main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian ${codename}-backports main contrib non-free non-free-firmware
-EOF
+            [[ -z "$codename" ]] && codename="trixie"   # 2026 合理默认（Debian 13）
+            comps="main contrib non-free non-free-firmware"
+            if [[ "$mode" == "china" ]]; then
+                base_uri="${mirror_url}/debian"; sec_uri="${mirror_url}/debian-security"
+            else
+                base_uri="https://deb.debian.org/debian"; sec_uri="https://deb.debian.org/debian-security"
+            fi
+            suites="${codename} ${codename}-updates ${codename}-backports"
+            sec_suite="${codename}-security"
             ;;
         ubuntu)
-            local codename="${DIST_CODENAME:-jammy}"
-            cat > "$sources_file" << EOF
-# Ubuntu Official Sources - Generated by BBR3 Script
-deb http://archive.ubuntu.com/ubuntu ${codename} main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu ${codename}-updates main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu ${codename}-backports main restricted universe multiverse
-deb http://security.ubuntu.com/ubuntu ${codename}-security main restricted universe multiverse
-EOF
+            [[ -z "$codename" ]] && codename="noble"     # 2026 合理默认（Ubuntu 24.04 LTS）
+            comps="main restricted universe multiverse"
+            if [[ "$mode" == "china" ]]; then
+                base_uri="${mirror_url}/ubuntu"; sec_uri="${mirror_url}/ubuntu"
+            else
+                base_uri="https://archive.ubuntu.com/ubuntu"; sec_uri="https://security.ubuntu.com/ubuntu"
+            fi
+            suites="${codename} ${codename}-updates ${codename}-backports"
+            sec_suite="${codename}-security"
             ;;
         *)
             print_warn "不支持自动切换源的系统: $DIST_ID"
             return 1
             ;;
     esac
-    
+
+    if [[ -n "$deb822" ]]; then
+        # deb822 格式：直接重写权威 .sources 文件（避免在 sources.list 另写一份造成重复源）
+        local bak="${deb822}.bak.$(date +%Y%m%d%H%M%S)"
+        cp "$deb822" "$bak" 2>/dev/null && print_info "已备份: $bak"
+        _APT_SRC_TARGET="$deb822"; _APT_SRC_BACKUP="$bak"
+        # 沿用原有的签名 keyring，没有则按发行版给默认值
+        local keyring
+        keyring=$(grep -m1 '^Signed-By:' "$deb822" 2>/dev/null | sed 's/^Signed-By:[[:space:]]*//')
+        if [[ -z "$keyring" ]]; then
+            [[ "$DIST_ID" == "ubuntu" ]] && keyring="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+            [[ "$DIST_ID" == "debian" ]] && keyring="/usr/share/keyrings/debian-archive-keyring.gpg"
+        fi
+        {
+            echo "# Generated by EasyBBR3 (${mode}, deb822)"
+            echo "Types: deb"
+            echo "URIs: ${base_uri}"
+            echo "Suites: ${suites}"
+            echo "Components: ${comps}"
+            [[ -n "$keyring" ]] && echo "Signed-By: ${keyring}"
+            echo
+            echo "Types: deb"
+            echo "URIs: ${sec_uri}"
+            echo "Suites: ${sec_suite}"
+            echo "Components: ${comps}"
+            [[ -n "$keyring" ]] && echo "Signed-By: ${keyring}"
+        } > "$deb822"
+    else
+        # 传统 one-line 格式
+        local sources_file="/etc/apt/sources.list"
+        local bak="${sources_file}.bak.$(date +%Y%m%d%H%M%S)"
+        [[ -f "$sources_file" ]] && cp "$sources_file" "$bak" 2>/dev/null && print_info "已备份: $bak"
+        _APT_SRC_TARGET="$sources_file"; _APT_SRC_BACKUP="$bak"
+        {
+            echo "# Generated by EasyBBR3 (${mode})"
+            local s
+            for s in $suites; do echo "deb ${base_uri} ${s} ${comps}"; done
+            echo "deb ${sec_uri} ${sec_suite} ${comps}"
+        } > "$sources_file"
+    fi
+    return 0
+}
+
+# 回滚最近一次 apply_apt_sources 的改动
+_restore_apt_sources() {
+    [[ -n "$_APT_SRC_TARGET" && -f "$_APT_SRC_BACKUP" ]] || return 0
+    cp "$_APT_SRC_BACKUP" "$_APT_SRC_TARGET" 2>/dev/null
+}
+
+switch_to_official_apt_sources() {
+    print_step "检测到系统使用国内镜像源，正在切换到官方源..."
+    apply_apt_sources official || return 1
     print_success "已切换到官方源"
-    
-    # 更新源缓存
+
     print_step "更新软件包缓存..."
     if apt_update_cached 1; then
         print_success "软件包缓存更新成功"
         return 0
     else
         print_error "软件包缓存更新失败，正在恢复原源配置..."
-        cp "$backup_file" "$sources_file"
+        _restore_apt_sources
         apt_update_cached 1 || true
         return 1
     fi
@@ -6831,54 +6916,17 @@ EOF
 
 # 切换 APT 源到国内镜像
 switch_to_china_apt_sources() {
-    local sources_file="/etc/apt/sources.list"
-    local backup_file="/etc/apt/sources.list.bak.$(date +%Y%m%d%H%M%S)"
-    local mirror_url="${MIRROR_URL:-https://mirrors.tuna.tsinghua.edu.cn}"
-    
     print_step "正在切换到国内镜像源..."
-    
-    # 备份当前源
-    cp "$sources_file" "$backup_file"
-    print_info "已备份原源配置到: $backup_file"
-    
-    # 根据发行版生成国内镜像源
-    case "$DIST_ID" in
-        debian)
-            local codename="${DIST_CODENAME:-bookworm}"
-            cat > "$sources_file" << EOF
-# Debian China Mirror Sources - Generated by BBR3 Script
-deb ${mirror_url}/debian ${codename} main contrib non-free non-free-firmware
-deb ${mirror_url}/debian ${codename}-updates main contrib non-free non-free-firmware
-deb ${mirror_url}/debian-security ${codename}-security main contrib non-free non-free-firmware
-deb ${mirror_url}/debian ${codename}-backports main contrib non-free non-free-firmware
-EOF
-            ;;
-        ubuntu)
-            local codename="${DIST_CODENAME:-jammy}"
-            cat > "$sources_file" << EOF
-# Ubuntu China Mirror Sources - Generated by BBR3 Script
-deb ${mirror_url}/ubuntu ${codename} main restricted universe multiverse
-deb ${mirror_url}/ubuntu ${codename}-updates main restricted universe multiverse
-deb ${mirror_url}/ubuntu ${codename}-backports main restricted universe multiverse
-deb ${mirror_url}/ubuntu ${codename}-security main restricted universe multiverse
-EOF
-            ;;
-        *)
-            print_warn "不支持自动切换源的系统: $DIST_ID"
-            return 1
-            ;;
-    esac
-    
+    apply_apt_sources china || return 1
     print_success "已切换到国内镜像源"
-    
-    # 更新源缓存
+
     print_step "更新软件包缓存..."
     if apt_update_cached 1; then
         print_success "软件包缓存更新成功"
         return 0
     else
         print_error "软件包缓存更新失败，正在恢复原源配置..."
-        cp "$backup_file" "$sources_file"
+        _restore_apt_sources
         apt_update_cached 1 || true
         return 1
     fi
@@ -7144,7 +7192,7 @@ verify_kernel_installation() {
     
     local grub_has_kernel=0
     if [[ -n "$grub_cfg" ]] && [[ -n "$kernel_version" ]]; then
-        if grep -q "$kernel_version" "$grub_cfg" 2>/dev/null; then
+        if grep -qF -e "vmlinuz-${kernel_version}" -e "kernel-${kernel_version}" "$grub_cfg" 2>/dev/null; then
             grub_has_kernel=1
         fi
     fi
@@ -7153,7 +7201,7 @@ verify_kernel_installation() {
         echo -e " [${YELLOW}${ICON_WARN}${NC}] 未找到新内核，尝试更新..."
         if update_grub_config; then
             # 重新检查
-            if [[ -n "$grub_cfg" ]] && grep -q "$kernel_version" "$grub_cfg" 2>/dev/null; then
+            if [[ -n "$grub_cfg" ]] && grep -qF -e "vmlinuz-${kernel_version}" -e "kernel-${kernel_version}" "$grub_cfg" 2>/dev/null; then
                 echo -e "      [${GREEN}${ICON_OK}${NC}] GRUB 更新成功"
                 grub_has_kernel=1
             else
@@ -7872,14 +7920,15 @@ download_xanmod_direct() {
         rm -rf "$tmp_dir"
         return 1
     fi
-    local pkg_list_url="http://deb.xanmod.org/dists/${xanmod_codename}/main/binary-amd64/Packages.gz"
+    # 使用 https 传输：TLS 认证服务器身份，配合下方 SHA256 校验防止 .deb 被篡改/损坏
+    local pkg_list_url="https://deb.xanmod.org/dists/${xanmod_codename}/main/binary-amd64/Packages.gz"
     local pkg_list
 
     print_info "获取包列表..."
     pkg_list=$(curl -fsSL --connect-timeout 15 "$pkg_list_url" 2>/dev/null | gunzip 2>/dev/null)
 
     if [[ -z "$pkg_list" ]]; then
-        pkg_list_url="http://deb.xanmod.org/dists/${xanmod_codename}/main/binary-amd64/Packages"
+        pkg_list_url="https://deb.xanmod.org/dists/${xanmod_codename}/main/binary-amd64/Packages"
         pkg_list=$(curl -fsSL --connect-timeout 15 "$pkg_list_url" 2>/dev/null)
     fi
     
@@ -7912,8 +7961,15 @@ download_xanmod_direct() {
     fi
     
     print_info "找到内核包: ${pkg_name}"
-    
-    local pkg_url="http://deb.xanmod.org/${pkg_filename}"
+
+    # 提取该包在仓库元数据中的 SHA256，用于下载后完整性校验
+    local pkg_sha=""
+    pkg_sha=$(echo "$pkg_list" | awk -v pkg="$pkg_name" '
+        /^Package:/ { current_pkg = $2 }
+        /^SHA256:/ && current_pkg == pkg { print $2; exit }
+    ')
+
+    local pkg_url="https://deb.xanmod.org/${pkg_filename}"
     local deb_file="${tmp_dir}/$(basename "$pkg_filename")"
     
     print_info "下载: $(basename "$pkg_filename")"
@@ -7935,7 +7991,24 @@ download_xanmod_direct() {
     fi
     
     print_success "下载完成"
-    
+
+    # SHA256 完整性校验（防止下载损坏或传输中被篡改后以 root 安装恶意内核包）
+    if [[ -n "$pkg_sha" ]] && command -v sha256sum >/dev/null 2>&1; then
+        print_step "校验内核包完整性 (SHA256)..."
+        local actual_sha
+        actual_sha=$(sha256sum "$deb_file" 2>/dev/null | awk '{print $1}')
+        if [[ "$actual_sha" != "$pkg_sha" ]]; then
+            print_error "SHA256 校验失败，已中止安装！"
+            print_error "  期望: ${pkg_sha}"
+            print_error "  实际: ${actual_sha:-(无法计算)}"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+        print_success "SHA256 校验通过"
+    else
+        print_warn "未获取到仓库 SHA256 或缺少 sha256sum，跳过完整性校验"
+    fi
+
     # 安装 deb 包
     print_step "安装内核包..."
     if dpkg -i "$deb_file"; then
@@ -8040,13 +8113,9 @@ _install_kernel_xanmod_core() {
             apt-get install -y -qq curl gnupg
 
             # 检测 CPU 支持的指令集级别（需在 APT 包校验前可用）
-            # XanMod 仅提供 x64v1/v2/v3，无 x64v4，AVX2 即推荐 x64v3
-            local cpu_level="1"
-            if grep -q "avx2" /proc/cpuinfo 2>/dev/null; then
-                cpu_level="3"
-            elif grep -q "avx" /proc/cpuinfo 2>/dev/null; then
-                cpu_level="2"
-            fi
+            # 统一使用 detect_cpu_level：x86-64-v2 的判定基线是 SSE4.2/POPCNT（而非 AVX）
+            local cpu_level
+            cpu_level=$(detect_cpu_level)
 
             # 如果选择直接下载方式
             if [[ "$XANMOD_INSTALL_METHOD" == "direct" ]]; then
@@ -8091,8 +8160,8 @@ _install_kernel_xanmod_core() {
                 return 1
             fi
 
-            # 添加源（使用发行版代号，而非旧的 releases 套件）
-            local repo_url="http://deb.xanmod.org"
+            # 添加源（使用发行版代号，而非旧的 releases 套件；https 传输）
+            local repo_url="https://deb.xanmod.org"
             local xanmod_codename="${DIST_CODENAME:-$(lsb_release -sc 2>/dev/null || true)}"
             if [[ -z "$xanmod_codename" ]]; then
                 print_error "无法解析发行版代号，无法配置 XanMod APT 源"
@@ -8270,7 +8339,25 @@ _install_kernel_liquorix_core() {
             ;;
         debian)
             print_step "安装 Liquorix 内核..."
-            curl -s 'https://liquorix.net/install-liquorix.sh' | bash
+            # 不使用 "curl | bash"：先下载到临时文件并校验，再执行，
+            # 避免半截下载被以 root 执行，且便于审计内容。
+            local lqx_tmp
+            lqx_tmp=$(mktemp /tmp/install-liquorix.XXXXXX.sh 2>/dev/null) || lqx_tmp="/tmp/install-liquorix.$$.sh"
+            if ! curl -fsSL --connect-timeout 15 'https://liquorix.net/install-liquorix.sh' -o "$lqx_tmp" 2>/dev/null || [[ ! -s "$lqx_tmp" ]]; then
+                print_error "下载 Liquorix 安装脚本失败"
+                rm -f "$lqx_tmp"
+                return 1
+            fi
+            # 基本校验：必须是 shell 脚本且语法正确，否则拒绝执行
+            if ! head -n1 "$lqx_tmp" | grep -qE '^#!.*(bash|sh)' || ! bash -n "$lqx_tmp" 2>/dev/null; then
+                print_error "Liquorix 安装脚本校验失败（非预期内容），已中止"
+                rm -f "$lqx_tmp"
+                return 1
+            fi
+            bash "$lqx_tmp"
+            local lqx_rc=$?
+            rm -f "$lqx_tmp"
+            [[ $lqx_rc -eq 0 ]] || return 1
             ;;
         *)
             print_error "Liquorix 仅支持 Debian/Ubuntu 系统"
@@ -8307,6 +8394,13 @@ _install_kernel_elrepo_core() {
                 return 1
             fi
 
+            # CentOS 8（非 Stream）base 源已迁移到 vault.centos.org，mirrorlist 已下线。
+            # 若 makecache 失败多半源于此，给出明确指引（不自动改写仓库以免误伤）。
+            if [[ "$DIST_ID" == "centos" && "$rhel_ver" == "8" ]]; then
+                print_warn "CentOS 8 已 EOL：若软件包缓存更新失败，请先将 /etc/yum.repos.d/ 中的"
+                print_warn "  mirror.centos.org 改为 vault.centos.org（或迁移到 Rocky/AlmaLinux 8）"
+            fi
+
             print_step "更新软件包缓存..."
             if command -v dnf >/dev/null 2>&1; then
                 dnf makecache -q || true
@@ -8315,6 +8409,11 @@ _install_kernel_elrepo_core() {
             fi
 
             print_step "启用 ELRepo..."
+
+            # 先导入 ELRepo GPG 公钥，使后续 release RPM 与 kernel-ml 包的签名可被校验
+            print_step "导入 ELRepo GPG 公钥..."
+            rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org 2>/dev/null || \
+                print_warn "无法导入 ELRepo GPG 公钥，签名校验可能不可用"
 
             local elrepo_url="https://www.elrepo.org/elrepo-release-${rhel_ver}.el${rhel_ver}.elrepo.noarch.rpm"
 
@@ -8540,7 +8639,7 @@ show_main_menu() {
         echo
         print_menu "请选择操作" \
             "代理智能调优 (推荐翻墙用户！含一键自动优化) ⭐" \
-            "安装新内核 (获取BBR3支持)" \
+            "安装新内核 (XanMod 获取 BBRv3 / 其他为 BBR v1)" \
             "验证优化状态 (检测优化是否生效)" \
             "查看当前状态" \
             "备份/恢复配置" \
@@ -8586,21 +8685,22 @@ show_kernel_menu() {
         return
     fi
     
-    echo -e "${DIM}安装新内核可获得 BBR2/BBR3 支持${NC}"
+    echo -e "${DIM}说明：BBRv3 目前仅由 XanMod 内核提供（注册为 bbr）；${NC}"
+    echo -e "${DIM}      Liquorix / HWE / ELRepo 均为主线内核，仅含 BBR v1。${NC}"
     echo
-    
+
     local menu_items=()
-    
+
     case "$DIST_ID" in
         debian|ubuntu)
-            menu_items+=("XanMod (推荐，支持 BBR3)")
-            menu_items+=("Liquorix (桌面优化)")
-            if [[ "$DIST_ID" == "ubuntu" ]] && [[ "$DIST_VER" =~ ^(16|18|20|22|24)\. ]]; then
-                menu_items+=("HWE 内核 (官方硬件支持)")
+            menu_items+=("XanMod (推荐，唯一提供 BBRv3)")
+            menu_items+=("Liquorix (桌面优化，BBR v1)")
+            if [[ "$DIST_ID" == "ubuntu" ]] && [[ "$DIST_VER" =~ ^(20|22|24|26)\. ]]; then
+                menu_items+=("HWE 内核 (官方硬件支持，BBR v1)")
             fi
             ;;
         centos|rhel|rocky|almalinux)
-            menu_items+=("ELRepo kernel-ml (最新主线)")
+            menu_items+=("ELRepo kernel-ml (最新主线，BBR v1)")
             ;;
     esac
     
@@ -8677,30 +8777,130 @@ do_auto_tune() {
 }
 
 # 卸载配置
+# 迁移旧版 99-* 前缀 sysctl 配置到新的数字前缀方案，修复加载顺序覆盖问题(C1)。
+# 幂等：仅当存在旧文件时才动作；非 root 时安全跳过。
+migrate_legacy_configs() {
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || return 0
+    local moved=0 old new
+    local -A _map=(
+        ["/etc/sysctl.d/99-bbr.conf"]="$SYSCTL_FILE"
+        ["/etc/sysctl.d/99-bbr-line.conf"]="$LINE_SYSCTL_FILE"
+        ["/etc/sysctl.d/99-bbr-apps.conf"]="$APP_SYSCTL_FILE"
+        ["/etc/sysctl.d/99-bbr-anti-loss.conf"]="$ANTI_LOSS_SYSCTL_FILE"
+        ["/etc/sysctl.d/99-bbr-qdisc.conf"]="$QDISC_SYSCTL_FILE"
+    )
+    for old in "${!_map[@]}"; do
+        new="${_map[$old]}"
+        [[ -f "$old" ]] || continue
+        if [[ -e "$new" ]]; then
+            # 新文件已存在：旧文件会以 99-* 顺序在其后加载并覆盖之，直接删除
+            rm -f "$old" && moved=1
+        else
+            mv "$old" "$new" 2>/dev/null && moved=1
+        fi
+    done
+    # 时段优化配置移出 /etc/sysctl.d，避免开机被 sysctl --system 无条件加载
+    if [[ -f /etc/sysctl.d/99-bbr-peak.conf || -f /etc/sysctl.d/99-bbr-normal.conf ]]; then
+        mkdir -p "$STATE_DIR"
+        [[ -f /etc/sysctl.d/99-bbr-peak.conf ]] && mv -f /etc/sysctl.d/99-bbr-peak.conf "$PEAK_CONFIG_FILE" 2>/dev/null
+        [[ -f /etc/sysctl.d/99-bbr-normal.conf ]] && mv -f /etc/sysctl.d/99-bbr-normal.conf "$NORMAL_CONFIG_FILE" 2>/dev/null
+        # 旧切换脚本仍指向 /etc/sysctl.d 路径，重新生成指向新路径
+        if [[ -f "$TIME_SWITCH_SCRIPT" ]]; then
+            cat > "$TIME_SWITCH_SCRIPT" << SCRIPT
+#!/bin/bash
+# BBR3 时间自动切换脚本（自动生成，请勿手动修改）
+HOUR=\$(date +%H)
+if [[ 10#\$HOUR -ge 19 || 10#\$HOUR -lt 2 ]]; then
+    sysctl -p "${PEAK_CONFIG_FILE}" >/dev/null 2>&1
+    logger "BBR3: 切换到晚高峰模式"
+else
+    sysctl -p "${NORMAL_CONFIG_FILE}" >/dev/null 2>&1
+    logger "BBR3: 切换到标准模式"
+fi
+SCRIPT
+            chmod +x "$TIME_SWITCH_SCRIPT"
+        fi
+        moved=1
+    fi
+    if [[ $moved -eq 1 ]]; then
+        log_info "已迁移旧版 99-bbr*.conf 到新的加载顺序方案 (90-94 前缀)"
+        sysctl --system >/dev/null 2>&1
+    fi
+}
+
 do_uninstall() {
     print_header "卸载配置"
-    
-    if [[ ! -f "$SYSCTL_FILE" ]]; then
+
+    # 本脚本创建的全部 sysctl 配置（新版 90-94 前缀）
+    local bbr_configs=(
+        "$SYSCTL_FILE" "$LINE_SYSCTL_FILE" "$APP_SYSCTL_FILE"
+        "$ANTI_LOSS_SYSCTL_FILE" "$QDISC_SYSCTL_FILE"
+    )
+    # 旧版 99-* 前缀残留（兼容历史安装）
+    local legacy_configs=(
+        /etc/sysctl.d/99-bbr.conf /etc/sysctl.d/99-bbr-line.conf
+        /etc/sysctl.d/99-bbr-apps.conf /etc/sysctl.d/99-bbr-anti-loss.conf
+        /etc/sysctl.d/99-bbr-qdisc.conf /etc/sysctl.d/99-bbr-peak.conf
+        /etc/sysctl.d/99-bbr-normal.conf
+    )
+
+    # 检测是否存在任何可卸载内容
+    local found=0 f
+    for f in "${bbr_configs[@]}" "${legacy_configs[@]}" "$PEAK_CONFIG_FILE" "$NORMAL_CONFIG_FILE"; do
+        [[ -e "$f" ]] && { found=1; break; }
+    done
+    if [[ $found -eq 0 ]] && ! crontab -l 2>/dev/null | grep -q bbr3-time-switch; then
         print_info "没有找到配置文件，无需卸载"
         return
     fi
-    
-    print_warn "这将删除 BBR 配置并恢复系统默认设置"
-    
+
+    print_warn "这将删除所有 BBR 优化配置、定时任务、systemd 服务和 iptables 规则，并恢复系统默认"
     if ! confirm "确定要卸载吗？" "n"; then
         print_info "已取消"
         return
     fi
-    
-    # 备份后删除
+
+    # 1. 备份后删除 sysctl 配置（含旧版残留）
     backup_config
-    rm -f "$SYSCTL_FILE"
-    
-    # 重新加载系统配置
+    print_step "删除 sysctl 配置文件..."
+    rm -f "${bbr_configs[@]}" "${legacy_configs[@]}"
+
+    # 2. 时段自动优化：cron + 切换脚本 + 配置
+    print_step "移除时段自动优化..."
+    if crontab -l 2>/dev/null | grep -q bbr3-time-switch; then
+        crontab -l 2>/dev/null | grep -v bbr3-time-switch | crontab - 2>/dev/null
+    fi
+    rm -f "$TIME_SWITCH_SCRIPT" "$PEAK_CONFIG_FILE" "$NORMAL_CONFIG_FILE"
+
+    # 3. LINE 预热 systemd 服务/定时器
+    print_step "移除 LINE 预热服务..."
+    systemctl stop bbr3-line-warmup.timer 2>/dev/null
+    systemctl disable bbr3-line-warmup.timer 2>/dev/null
+    rm -f /etc/systemd/system/bbr3-line-warmup.service \
+          /etc/systemd/system/bbr3-line-warmup.timer \
+          /usr/local/bin/bbr3-line-warmup
+    systemctl daemon-reload 2>/dev/null
+
+    # 4. iptables QoS 链（LINE 及各应用）
+    if command -v iptables >/dev/null 2>&1; then
+        print_step "移除 iptables QoS 规则..."
+        local chain
+        for chain in LINE_QOS GOOGLE_QOS APPLE_QOS META_QOS X_QOS TELEGRAM_QOS; do
+            iptables -t mangle -D POSTROUTING -j "$chain" 2>/dev/null
+            iptables -t mangle -F "$chain" 2>/dev/null
+            iptables -t mangle -X "$chain" 2>/dev/null
+        done
+    fi
+
+    # 5. LINE / 应用 IP 列表与配置
+    rm -f "$LINE_IP_FILE" "$LINE_CONFIG_FILE"
+    rm -rf "$APP_IP_DIR"
+
+    # 6. 重新加载系统配置
     sysctl --system >/dev/null 2>&1 || true
-    
-    print_success "配置已卸载"
-    print_info "系统将使用默认的拥塞控制算法"
+
+    print_success "配置已完全卸载"
+    print_info "系统将使用默认的拥塞控制算法（如需彻底恢复，可重启）"
 }
 
 # 安装快捷命令
@@ -8763,10 +8963,13 @@ setup_time_based_optimization() {
         return
     fi
     
-    # 创建高峰模式配置
-    local peak_config="/etc/sysctl.d/99-bbr-peak.conf"
-    local normal_config="/etc/sysctl.d/99-bbr-normal.conf"
-    
+    # 创建高峰/标准模式配置
+    # 注意：放在 /var/lib/easybbr3 而非 /etc/sysctl.d，否则 sysctl --system 会在
+    # 开机时无条件加载，导致无论几点都强制进入某一模式（由 cron + @reboot 按时段切换）。
+    local peak_config="$PEAK_CONFIG_FILE"
+    local normal_config="$NORMAL_CONFIG_FILE"
+    mkdir -p "$STATE_DIR"
+
     # 生成高峰模式配置
     cat > "$peak_config" << 'EOF'
 # BBR3 晚高峰模式 (19:00-02:00)
@@ -8803,34 +9006,33 @@ net.core.netdev_max_backlog = 250000
 EOF
     print_success "标准模式配置已生成: $normal_config"
     
-    # 创建切换脚本
-    local switch_script="/usr/local/bin/bbr3-time-switch"
-    cat > "$switch_script" << 'SCRIPT'
+    # 创建切换脚本（路径在生成时展开，指向 /var/lib/easybbr3 下的配置）
+    local switch_script="$TIME_SWITCH_SCRIPT"
+    cat > "$switch_script" << SCRIPT
 #!/bin/bash
-# BBR3 时间自动切换脚本
-HOUR=$(date +%H)
-if [[ 10#$HOUR -ge 19 || 10#$HOUR -lt 2 ]]; then
+# BBR3 时间自动切换脚本（自动生成，请勿手动修改）
+HOUR=\$(date +%H)
+if [[ 10#\$HOUR -ge 19 || 10#\$HOUR -lt 2 ]]; then
     # 晚高峰模式 (19:00-02:00)
-    sysctl -p /etc/sysctl.d/99-bbr-peak.conf >/dev/null 2>&1
+    sysctl -p "${PEAK_CONFIG_FILE}" >/dev/null 2>&1
     logger "BBR3: 切换到晚高峰模式"
 else
     # 标准模式
-    sysctl -p /etc/sysctl.d/99-bbr-normal.conf >/dev/null 2>&1
+    sysctl -p "${NORMAL_CONFIG_FILE}" >/dev/null 2>&1
     logger "BBR3: 切换到标准模式"
 fi
 SCRIPT
     chmod +x "$switch_script"
     print_success "切换脚本已创建: $switch_script"
-    
-    # 添加 cron 任务
-    local cron_job="0 * * * * $switch_script"
+
+    # 添加 cron 任务：每小时检查一次，并在开机时执行一次（保证开机即按当前时段生效）
     if ! crontab -l 2>/dev/null | grep -q "bbr3-time-switch"; then
-        (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
-        print_success "Cron 任务已添加 (每小时检查一次)"
+        (crontab -l 2>/dev/null; echo "0 * * * * $switch_script"; echo "@reboot $switch_script") | crontab -
+        print_success "Cron 任务已添加 (每小时检查一次 + 开机执行一次)"
     else
         print_info "Cron 任务已存在"
     fi
-    
+
     # 立即执行一次
     "$switch_script"
     
@@ -8860,7 +9062,8 @@ update_script() {
         print_info "请手动下载最新版本"
         return 1
     fi
-    local tmp_script="/tmp/easybbr3_new.sh"
+    local tmp_script
+    tmp_script=$(mktemp /tmp/easybbr3_new.XXXXXX.sh 2>/dev/null) || tmp_script="/tmp/easybbr3_new.$$.sh"
 
     echo -e "${DIM}从 GitHub 下载最新版本...${NC}"
     echo
@@ -8960,23 +9163,26 @@ run_pvetools() {
     
     print_step "下载 PVE Tools 脚本..."
     
-    local pve_script="/tmp/pvetools.sh"
+    local pve_script
+    pve_script=$(mktemp /tmp/pvetools.XXXXXX.sh 2>/dev/null) || pve_script="/tmp/pvetools.$$.sh"
     local pve_url="https://raw.githubusercontent.com/xx2468171796/pvetools/main/pvetools.sh"
-    
+
     # 下载脚本
-    if curl -fsSL "$pve_url" -o "$pve_script" 2>/dev/null; then
-        chmod +x "$pve_script"
-        print_success "下载成功，正在运行..."
-        echo
-        bash "$pve_script"
-        rm -f "$pve_script"
-    elif wget -qO "$pve_script" "$pve_url" 2>/dev/null; then
-        chmod +x "$pve_script"
-        print_success "下载成功，正在运行..."
-        echo
-        bash "$pve_script"
-        rm -f "$pve_script"
+    if curl -fsSL "$pve_url" -o "$pve_script" 2>/dev/null || wget -qO "$pve_script" "$pve_url" 2>/dev/null; then
+        # 下载后校验：必须是非空 shell 脚本且语法正确，再以 root 执行
+        if [[ -s "$pve_script" ]] && head -n1 "$pve_script" | grep -qE '^#!.*(bash|sh)' && bash -n "$pve_script" 2>/dev/null; then
+            chmod +x "$pve_script"
+            print_success "下载成功，正在运行..."
+            echo
+            bash "$pve_script"
+            rm -f "$pve_script"
+        else
+            print_error "下载的 PVE Tools 脚本校验失败（非预期内容），已中止"
+            rm -f "$pve_script"
+            return 1
+        fi
     else
+        rm -f "$pve_script"
         print_error "下载失败，请检查网络连接"
         echo
         echo -e "手动运行命令："
@@ -8997,8 +9203,8 @@ ${BOLD}BBR3 一键脚本 v${SCRIPT_VERSION}${NC}
 
 ${BOLD}用法:${NC}
   sudo $SCRIPT_NAME [选项]
-  wget -qO- ${GITHUB_RAW}/bbr.sh | sudo bash
-  curl -fsSL ${GITHUB_RAW}/bbr.sh | sudo bash -s -- [选项]
+  wget -qO- ${GITHUB_RAW}/easybbr3.sh | sudo bash
+  curl -fsSL ${GITHUB_RAW}/easybbr3.sh | sudo bash -s -- [选项]
 
 ${BOLD}选项:${NC}
   ${CYAN}--algo <name>${NC}           设置拥塞算法: bbr|bbr2|bbr3|cubic|reno
@@ -9043,8 +9249,8 @@ ${BOLD}示例:${NC}
 
 ${BOLD}支持的系统:${NC}
   • Debian: 10 (Buster), 11 (Bullseye), 12 (Bookworm), 13 (Trixie)
-  • Ubuntu: 16.04, 18.04, 20.04, 22.04, 24.04
-  • RHEL/CentOS/Rocky/AlmaLinux: 7, 8, 9
+  • Ubuntu: 16.04, 18.04, 20.04, 22.04, 24.04 (26.04 实验性)
+  • RHEL/CentOS/Rocky/AlmaLinux: 8, 9, 10 (CentOS 7/8 已 EOL，仅尽力支持)
 
 ${BOLD}注意:${NC}
   • BBR2/BBR3 需要较新内核支持，脚本会自动检测
@@ -9081,7 +9287,9 @@ main() {
     # 初始化
     log_init
     setup_traps
-    
+    # 迁移旧版 99-* 前缀配置到新的加载顺序方案（幂等，非 root 自动跳过）
+    migrate_legacy_configs
+
     # 解析参数
     local install_kernel=""
     local show_status_only=0
@@ -9358,7 +9566,17 @@ main() {
         # 规范化
         CHOSEN_ALGO=$(normalize_algo "$CHOSEN_ALGO")
         CHOSEN_QDISC="${CHOSEN_QDISC:-fq}"
-        
+
+        # 校验 qdisc，避免把非法值写入持久化 sysctl 配置导致重启后网络队列异常
+        case "$CHOSEN_QDISC" in
+            fq|fq_codel|fq_pie|cake|pfifo_fast) ;;
+            *)
+                print_error "无效的队列规则: ${CHOSEN_QDISC}"
+                print_info "可用选项: fq, fq_codel, fq_pie, cake, pfifo_fast"
+                exit 1
+                ;;
+        esac
+
         # 设置默认缓冲区（检测容器限制）
         local max_rmem max_wmem
         max_rmem=$(cat /proc/sys/net/core/rmem_max 2>/dev/null || echo "67108864")
@@ -9403,5 +9621,7 @@ main() {
     show_main_menu
 }
 
-# 运行主函数
-main "$@"
+# 运行主函数（被 source 时不自动执行，便于测试与函数复用）
+if [[ "${BASH_SOURCE[0]:-$0}" == "${0}" ]]; then
+    main "$@"
+fi
