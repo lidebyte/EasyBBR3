@@ -38,6 +38,14 @@
 
 ### 一键运行（推荐）
 
+**已经是 root**（提示符为 `root@...`，多数 VPS 默认如此）：
+
+```bash
+wget -qO- https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main/easybbr3.sh | bash
+```
+
+**普通用户**（已安装 `sudo`）：
+
 ```bash
 wget -qO- https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main/easybbr3.sh | sudo bash
 ```
@@ -47,10 +55,12 @@ wget -qO- https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main/easybbr3.
 ```bash
 wget -O easybbr3.sh https://raw.githubusercontent.com/xx2468171796/EasyBBR3/main/easybbr3.sh
 chmod +x easybbr3.sh
-sudo bash easybbr3.sh
+bash easybbr3.sh          # root 用户
+# 或 sudo bash easybbr3.sh   # 普通用户
 ```
 
-> 需要 **root** 权限，建议直接以 root 身份运行或使用 `sudo`。
+> 需要 **root** 权限。已是 root 直接用 `| bash`（无需 `sudo`）；精简镜像可能没装 `sudo`，
+> 若提示 `sudo: command not found`，说明你已是 root，去掉 `sudo` 即可，或先 `apt install -y sudo`。
 
 ---
 
