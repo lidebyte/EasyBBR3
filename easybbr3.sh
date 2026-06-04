@@ -9353,10 +9353,17 @@ EOF
 #===============================================================================
 
 main() {
-    # 检测管道执行模式
+    # 检测管道执行模式（如 wget -qO- ... | sudo bash）
+    # 此时 stdin 是脚本内容而非终端，若直接退回非交互会导致一键运行只打印帮助。
+    # 只要控制终端 /dev/tty 可用，就把 stdin 重新接回终端，让交互菜单正常工作；
+    # 真正没有终端（cron、CI 等）才退回非交互模式。
     if [[ ! -t 0 ]]; then
         PIPE_MODE=1
-        NON_INTERACTIVE=1
+        if [[ -r /dev/tty ]] && { exec </dev/tty; } 2>/dev/null && [[ -t 0 ]]; then
+            : # 成功接回终端，保持交互
+        else
+            NON_INTERACTIVE=1
+        fi
     fi
     
     # 初始化
