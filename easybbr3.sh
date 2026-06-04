@@ -7189,14 +7189,48 @@ verify_kernel_installation() {
             [[ -n "$pkg" ]] && echo "        - $pkg"
         done
     fi
-    
+
+    # 选出本次真正要验证/引导的目标内核包。
+    # 同一次运行里 apt upgrade 可能顺带升级出发行版自带内核（如 Debian stock
+    # linux-image-6.1.0-49-amd64），它会与 XanMod 内核一起出现在差集里。若按字母序
+    # 取第一个，会把版本更低的 stock 内核误判为"新内核"（6.1.0-49 字母序排在
+    # 6.19.11-xanmod 前面），导致一次性引导反而指向更旧的内核。
+    # 策略：优先保留与安装类型匹配的内核包（xanmod/liquorix/elrepo），再在候选中按
+    # 版本号 sort -V 取最高者。
+    local kernel_match_pattern=""
+    case "$kernel_type" in
+        XanMod|xanmod)     kernel_match_pattern="xanmod" ;;
+        Liquorix|liquorix) kernel_match_pattern="liquorix|lqx" ;;
+        ELRepo|elrepo)     kernel_match_pattern="kernel-ml|kernel-lt|elrepo" ;;
+        *)                 kernel_match_pattern="$expected_pattern" ;;
+    esac
+    local candidate_kernels="$new_kernels"
+    if [[ -n "$kernel_match_pattern" ]]; then
+        local matched_kernels
+        matched_kernels=$(echo "$new_kernels" | grep -Ei "$kernel_match_pattern" || true)
+        if [[ -n "$matched_kernels" ]]; then
+            candidate_kernels="$matched_kernels"
+        else
+            # 差集里没有匹配安装类型的内核（例如目标内核此前已安装、本次仅升级出
+            # 了发行版自带内核）：不要把无关的 stock 内核当成目标，从已安装列表里
+            # 直接找该类型的最高版本内核作为候选。
+            local installed_typed
+            installed_typed=$(echo "$kernel_list_after" | grep -Ei "$kernel_match_pattern" || true)
+            if [[ -n "$installed_typed" ]]; then
+                candidate_kernels="$installed_typed"
+            fi
+        fi
+    fi
+    # 按版本号降序排列候选（sort -V），确保取到的是最高版本而非字母序第一个。
+    candidate_kernels=$(echo "$candidate_kernels" | grep -v '^$' | sort -V -r)
+
     # ========== 检查 2: vmlinuz 内核文件 ==========
     echo -n "  [2/5] 检查内核文件 (vmlinuz)..."
-    
+
     local kernel_file=""
     case "$PKG_MANAGER" in
         apt)
-            for pkg in $new_kernels; do
+            for pkg in $candidate_kernels; do
                 local version="${pkg#linux-image-}"
                 version="${version%-unsigned}"
                 if [[ -f "/boot/vmlinuz-${version}" ]]; then
@@ -7209,7 +7243,7 @@ verify_kernel_installation() {
             done
             ;;
         dnf|yum)
-            for pkg in $new_kernels; do
+            for pkg in $candidate_kernels; do
                 local version
                 version=$(rpm -q --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}' "$pkg" 2>/dev/null)
                 if [[ -f "/boot/vmlinuz-${version}" ]]; then
@@ -7842,18 +7876,33 @@ rollback_kernel_installation() {
     print_warn "内核安装验证失败，正在回滚..."
     
     if [[ -z "$INSTALLED_KERNEL_PKG" ]]; then
-        # 尝试找出新安装的内核包
-        local kernel_list_after=""
+        # 尝试找出新安装的内核包。注意：差集里可能混入同批 apt upgrade 升级出的
+        # 发行版自带内核，不能用 head -1（字母序）盲选，否则可能误删 stock 内核。
+        # 优先匹配安装类型，再按版本号取最高者。
+        local kernel_list_after="" new_kernels=""
+        local rb_pattern=""
+        case "$kernel_type" in
+            XanMod|xanmod)     rb_pattern="xanmod" ;;
+            Liquorix|liquorix) rb_pattern="liquorix|lqx" ;;
+            ELRepo|elrepo)     rb_pattern="kernel-ml|kernel-lt|elrepo" ;;
+        esac
         case "$PKG_MANAGER" in
             apt)
                 kernel_list_after=$(dpkg -l | grep -E '^ii\s+linux-image-' | awk '{print $2}' | sort)
-                INSTALLED_KERNEL_PKG=$(comm -13 <(echo "$KERNEL_LIST_BEFORE") <(echo "$kernel_list_after") | head -1)
                 ;;
             dnf|yum)
                 kernel_list_after=$(rpm -qa | grep -E '^kernel-[0-9]|^kernel-ml|^kernel-lt' | sort)
-                INSTALLED_KERNEL_PKG=$(comm -13 <(echo "$KERNEL_LIST_BEFORE") <(echo "$kernel_list_after") | head -1)
                 ;;
         esac
+        new_kernels=$(comm -13 <(echo "$KERNEL_LIST_BEFORE") <(echo "$kernel_list_after"))
+        local rb_candidates="$new_kernels"
+        if [[ -n "$rb_pattern" ]]; then
+            local rb_matched
+            rb_matched=$(echo "$new_kernels" | grep -Ei "$rb_pattern" || true)
+            # 仅在差集里确实新装了匹配类型内核时才回滚它；否则不要误删无关内核
+            rb_candidates="$rb_matched"
+        fi
+        INSTALLED_KERNEL_PKG=$(echo "$rb_candidates" | grep -v '^$' | sort -V -r | head -1)
     fi
     
     if [[ -z "$INSTALLED_KERNEL_PKG" ]]; then
