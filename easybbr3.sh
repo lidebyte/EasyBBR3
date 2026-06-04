@@ -8066,6 +8066,29 @@ xanmod_codename_candidates() {
     done
 }
 
+# 查询 XanMod 仓库中当前 CPU 微架构级别可用的最新内核版本（uname -r 形式，
+# 如 6.19.11-x64v3-xanmod1）。读不到（网络问题等）返回非零且无输出。
+xanmod_latest_repo_version() {
+    local cpu_level
+    cpu_level=$(detect_cpu_level)
+    local pkg_list="" cand
+    while IFS= read -r cand; do
+        [[ -z "$cand" ]] && continue
+        pkg_list=$(curl -fsSL --connect-timeout 10 "https://deb.xanmod.org/dists/${cand}/main/binary-amd64/Packages.gz" 2>/dev/null | gunzip 2>/dev/null)
+        [[ -z "$pkg_list" ]] && pkg_list=$(curl -fsSL --connect-timeout 10 "https://deb.xanmod.org/dists/${cand}/main/binary-amd64/Packages" 2>/dev/null)
+        [[ -n "$pkg_list" ]] && break
+    done < <(xanmod_codename_candidates)
+    [[ -z "$pkg_list" ]] && return 1
+    # 取与当前 CPU 级别匹配的 linux-image 包名，去掉前缀后按版本号取最高者
+    local latest
+    latest=$(echo "$pkg_list" | awk '/^Package: linux-image-.*xanmod/{print $2}' \
+        | grep -E "x64v${cpu_level}([^0-9]|$)" \
+        | sed 's/^linux-image-//' \
+        | sort -V | tail -1)
+    [[ -n "$latest" ]] || return 1
+    echo "$latest"
+}
+
 download_xanmod_direct() {
     local cpu_level
     cpu_level=$(detect_cpu_level)
@@ -8867,7 +8890,24 @@ show_kernel_menu() {
             local cur_kernel
             cur_kernel=$(uname -r)
             if [[ "$cur_kernel" == *xanmod* ]]; then
-                print_info "当前已是 XanMod 内核（${cur_kernel}），继续将尝试更新到最新版。"
+                print_info "当前已是 XanMod 内核（${cur_kernel}）。"
+                print_step "查询 XanMod 仓库最新版本..."
+                local latest_ver
+                latest_ver=$(xanmod_latest_repo_version || true)
+                if [[ -n "$latest_ver" ]]; then
+                    # 当前版本 >= 仓库最新版（sort -V 最大值即为当前）则已是最新
+                    if [[ "$(printf '%s\n%s\n' "$latest_ver" "$cur_kernel" | sort -V | tail -1)" == "$cur_kernel" ]]; then
+                        print_success "已是仓库最新版（${cur_kernel}），无需重装或重启。"
+                        if ! confirm "仍要强制重新安装吗？" "n"; then
+                            print_info "已跳过安装。"
+                            return
+                        fi
+                    else
+                        print_info "仓库有更新版本：${latest_ver}（当前 ${cur_kernel}），可继续更新。"
+                    fi
+                else
+                    print_warn "无法查询仓库最新版本（可能网络问题），将继续按最新版安装。"
+                fi
             fi
             print_warn "安装/更新内核是重要操作，可能影响系统启动。"
             if ! confirm "确定要安装/更新到最新版 XanMod 内核吗？" "n"; then
