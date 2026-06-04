@@ -8000,35 +8000,55 @@ detect_cpu_level() {
 }
 
 # 直接从 XanMod APT 池下载 deb 包（绕过 APT 索引）
+# 解析 XanMod 仓库可用的发行版代号候选（主机代号优先，其后回退到当前仍维护的基线代号）。
+# XanMod 按发行版代号发包，但会停止维护较老代号（如 Ubuntu jammy/22.04 已被移除），
+# 其内核 .deb 跨发行版通用，回退到受支持代号不影响内核可用性。每行输出一个候选代号。
+xanmod_codename_candidates() {
+    local host_codename="${DIST_CODENAME:-$(lsb_release -sc 2>/dev/null || true)}"
+    local candidates=()
+    [[ -n "$host_codename" ]] && candidates+=("$host_codename")
+    case "$DIST_ID" in
+        ubuntu) [[ "$host_codename" != "noble" ]] && candidates+=("noble") ;;
+        debian) [[ "$host_codename" != "bookworm" ]] && candidates+=("bookworm") ;;
+    esac
+    local c
+    for c in "${candidates[@]}"; do
+        echo "$c"
+    done
+}
+
 download_xanmod_direct() {
     local cpu_level
     cpu_level=$(detect_cpu_level)
     local tmp_dir="/tmp/xanmod-install-$$"
-    
+
     mkdir -p "$tmp_dir"
-    
+
     print_step "直接下载 XanMod 内核包..."
     print_info "CPU 微架构级别: x64v${cpu_level}"
-    
-    # 从 APT 源的 Packages 文件获取包信息（使用发行版代号；releases 套件已失效）
-    local xanmod_codename="${DIST_CODENAME:-$(lsb_release -sc 2>/dev/null || true)}"
-    if [[ -z "$xanmod_codename" ]]; then
-        print_warn "无法解析发行版代号"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
+
+    # 从 APT 源的 Packages 文件获取包信息。XanMod 按代号发包，老代号（如 jammy）已停维护，
+    # 逐个尝试候选代号（主机代号优先，回退到受支持基线）。
     # 使用 https 传输：TLS 认证服务器身份，配合下方 SHA256 校验防止 .deb 被篡改/损坏
-    local pkg_list_url="https://deb.xanmod.org/dists/${xanmod_codename}/main/binary-amd64/Packages.gz"
-    local pkg_list
+    local pkg_list=""
+    local used_codename=""
+    local cand
+    while IFS= read -r cand; do
+        [[ -z "$cand" ]] && continue
+        local pkg_list_url="https://deb.xanmod.org/dists/${cand}/main/binary-amd64/Packages.gz"
+        print_info "获取包列表 (${cand})..."
+        pkg_list=$(curl -fsSL --connect-timeout 15 "$pkg_list_url" 2>/dev/null | gunzip 2>/dev/null)
+        if [[ -z "$pkg_list" ]]; then
+            pkg_list_url="https://deb.xanmod.org/dists/${cand}/main/binary-amd64/Packages"
+            pkg_list=$(curl -fsSL --connect-timeout 15 "$pkg_list_url" 2>/dev/null)
+        fi
+        if [[ -n "$pkg_list" ]]; then
+            used_codename="$cand"
+            [[ "$cand" != "$(echo "${DIST_CODENAME:-}")" ]] && print_info "使用 XanMod 代号: ${cand}"
+            break
+        fi
+    done < <(xanmod_codename_candidates)
 
-    print_info "获取包列表..."
-    pkg_list=$(curl -fsSL --connect-timeout 15 "$pkg_list_url" 2>/dev/null | gunzip 2>/dev/null)
-
-    if [[ -z "$pkg_list" ]]; then
-        pkg_list_url="https://deb.xanmod.org/dists/${xanmod_codename}/main/binary-amd64/Packages"
-        pkg_list=$(curl -fsSL --connect-timeout 15 "$pkg_list_url" 2>/dev/null)
-    fi
-    
     if [[ -z "$pkg_list" ]]; then
         print_warn "无法获取包列表"
         rm -rf "$tmp_dir"
@@ -8257,61 +8277,69 @@ _install_kernel_xanmod_core() {
                 return 1
             fi
 
-            # 添加源（使用发行版代号，而非旧的 releases 套件；https 传输）
+            # 添加源：XanMod 按发行版代号发包，但已停止维护较老代号（如 Ubuntu jammy/22.04 被移除）。
+            # 逐个尝试候选代号（主机代号优先，回退到当前仍维护的基线代号）；内核 .deb 跨发行版通用，
+            # 回退代号不影响内核可用性。https 传输由 TLS 认证服务器身份。
             local repo_url="https://deb.xanmod.org"
-            local xanmod_codename="${DIST_CODENAME:-$(lsb_release -sc 2>/dev/null || true)}"
-            if [[ -z "$xanmod_codename" ]]; then
+            local host_codename="${DIST_CODENAME:-$(lsb_release -sc 2>/dev/null || true)}"
+            local codename_list
+            codename_list=$(xanmod_codename_candidates)
+            if [[ -z "$codename_list" ]]; then
                 print_error "无法解析发行版代号，无法配置 XanMod APT 源"
                 return 1
             fi
-            echo "deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] ${repo_url} ${xanmod_codename} main" > /etc/apt/sources.list.d/xanmod.list
-            
-            # 更新源（带重试和验证）
+
             print_step "更新 APT 源..."
-            local retry_count=0
-            local max_retries=3
             local update_success=0
-            
-            while [[ $retry_count -lt $max_retries ]]; do
-                # 执行 apt-get update 并正确检测返回值
-                if apt-get update -o Dir::Etc::sourcelist="/etc/apt/sources.list.d/xanmod.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" 2>&1; then
-                    # 验证 XanMod 包是否可用（仅检查带 -x64v 后缀的真实包名）
-                    if apt-cache show "linux-xanmod-x64v${cpu_level}" >/dev/null 2>&1 || \
-                       apt-cache show "linux-xanmod-lts-x64v${cpu_level}" >/dev/null 2>&1 || \
-                       apt-cache show linux-xanmod-lts-x64v1 >/dev/null 2>&1; then
-                        update_success=1
-                        print_success "XanMod 源更新成功，包已可用"
-                        break
-                    else
-                        print_warn "源已更新但未找到 XanMod 包，尝试完整更新..."
-                        # 尝试完整更新所有源
-                        apt-get update 2>&1 || true
-                        sleep 2
-                    fi
+            local used_codename=""
+            local cand
+            while IFS= read -r cand; do
+                [[ -z "$cand" ]] && continue
+                echo "deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] ${repo_url} ${cand} main" > /etc/apt/sources.list.d/xanmod.list
+                if [[ "$cand" != "$host_codename" ]]; then
+                    print_warn "XanMod 源无 ${host_codename} 套件，回退到 ${cand}（内核包通用）"
                 fi
-                ((++retry_count))
-                print_warn "更新源失败，重试 ${retry_count}/${max_retries}..."
-                sleep 3
-            done
-            
-            # 如果仍未成功，进行最后一次完整更新
+
+                local retry_count=0
+                local max_retries=3
+                while [[ $retry_count -lt $max_retries ]]; do
+                    # 仅刷新 XanMod 源并正确检测返回值
+                    if apt-get update -o Dir::Etc::sourcelist="/etc/apt/sources.list.d/xanmod.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" 2>&1; then
+                        # 验证 XanMod 包是否可用（仅检查带 -x64v 后缀的真实包名）
+                        if apt-cache show "linux-xanmod-x64v${cpu_level}" >/dev/null 2>&1 || \
+                           apt-cache show "linux-xanmod-lts-x64v${cpu_level}" >/dev/null 2>&1 || \
+                           apt-cache show linux-xanmod-lts-x64v1 >/dev/null 2>&1; then
+                            update_success=1
+                            used_codename="$cand"
+                            print_success "XanMod 源更新成功，包已可用 (${cand})"
+                            break
+                        fi
+                    fi
+                    ((++retry_count))
+                    print_warn "更新源失败，重试 ${retry_count}/${max_retries}..."
+                    sleep 3
+                done
+
+                [[ $update_success -eq 1 ]] && break
+            done <<< "$codename_list"
+
             if [[ $update_success -eq 0 ]]; then
+                # 最后再做一次完整 APT 更新后复查（覆盖偶发缓存未刷新的情况）
                 print_warn "尝试最后一次完整 APT 更新..."
                 apt-get update 2>&1 || true
                 sleep 2
-                # 再次验证（仅检查带 -x64v 后缀的真实包名）
                 if apt-cache show "linux-xanmod-x64v${cpu_level}" >/dev/null 2>&1 || \
                    apt-cache show "linux-xanmod-lts-x64v${cpu_level}" >/dev/null 2>&1 || \
                    apt-cache show linux-xanmod-lts-x64v1 >/dev/null 2>&1; then
                     update_success=1
                     print_success "XanMod 包已可用"
                 else
-                    print_error "无法获取 XanMod 包列表，请检查网络连接"
-                    print_info "提示：可尝试手动运行 'apt update' 后重试"
+                    print_error "无法获取 XanMod 包列表（已尝试代号: $(echo "$codename_list" | tr '\n' ' '))"
+                    print_info "提示：XanMod 可能已停止维护当前系统代号，或网络异常；可稍后重试"
                     return 1
                 fi
             fi
-            
+
             print_info "检测到 CPU 支持级别: x64v${cpu_level}"
 
             # 根据 CPU 级别选择合适的内核包
