@@ -45,7 +45,7 @@ fi
 #===============================================================================
 # 版本信息
 #===============================================================================
-readonly SCRIPT_VERSION="2.4.2"
+readonly SCRIPT_VERSION="2.4.3"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]:-$0}")"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 readonly GITHUB_URL="https://github.com/xx2468171796"
@@ -7786,9 +7786,31 @@ setup_kernel_oneshot_boot() {
     } > "$KERNEL_PENDING_FILE" 2>/dev/null || print_warn "无法写入待确认标记文件"
 
     print_success "已配置内核一次性引导安全模式"
-    print_kv "一次性引导" "新内核 ${new_version} 仅下次重启引导一次"
-    print_kv "失败回滚" "若新内核无法启动，断电重启即自动回到旧内核 ${running}"
-    print_kv "确认生效" "新内核正常启动后，再次运行 ${SCRIPT_NAME} 会自动设为默认"
+    echo
+    echo -e "${BOLD}${YELLOW}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${YELLOW}║  ${ICON_WARN} 重要：新内核【还没转正】，请务必读完以下三步！${YELLOW}      ║${NC}"
+    echo -e "${BOLD}${YELLOW}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    echo -e "  ${BOLD}${YELLOW}${ICON_WARN} 当前状态（一次性引导）${NC}"
+    echo -e "     新内核 ${BOLD}${new_version}${NC} 仅在 ${BOLD}下次重启${NC} 引导 ${BOLD}一次${NC}；"
+    echo -e "     ${DIM}此刻 GRUB 永久默认仍然是旧内核 ${running}，新内核尚未转正。${NC}"
+    echo
+    echo -e "  ${BOLD}${GREEN}${ICON_OK} 第一步：重启${NC}"
+    echo -e "     重启系统，让它尝试用新内核 ${BOLD}${new_version}${NC} 启动一次。"
+    echo
+    echo -e "  ${BOLD}${GREEN}${ICON_OK} 第二步：转正（${CYAN}关键！别忘了！${GREEN}）${NC}"
+    echo -e "     新内核能正常起来后，${BOLD}${YELLOW}必须再跑一次本脚本${NC} ${DIM}(${SCRIPT_NAME})${NC}"
+    echo -e "     —— 它会自动把新内核设为永久默认；"
+    echo -e "     或在 ${BOLD}主菜单${NC} 选 ${BOLD}${CYAN}「🔧 固定/转正当前内核为默认」${NC} 手动确认。"
+    echo
+    echo -e "  ${BOLD}${RED}${ICON_FAIL} 不转正的后果${NC}"
+    echo -e "     ${DIM}若一直不转正，下次重启会重新退回旧内核 ${running}（一次性引导用尽）。${NC}"
+    echo
+    echo -e "  ${BOLD}${CYAN}🛟 兜底保障${NC}"
+    echo -e "     ${DIM}万一新内核起不来，断电/重启会自动回滚到旧内核 ${running}，锁不死、可放心。${NC}"
+    echo
+    echo -e "${BOLD}${YELLOW}────────────────────────────────────────────────────────────${NC}"
+    echo
     return 0
 }
 
@@ -7865,6 +7887,64 @@ kernel_finalize_check() {
         print_info "新内核 ${version} 已安装，将在下次重启时引导一次以验证。"
     fi
 
+    return 0
+}
+
+# 手动把"当前正在运行的内核"固定为 GRUB 永久默认（转正），即使没有 pending 标记也能用。
+# 用途：一次性引导成功重启后，用户主动确认新内核可用并将其设为永久默认。
+pin_current_kernel() {
+    print_header "固定/转正当前内核为默认"
+
+    local running grub_cfg tools setdef_cmd new_id
+    running="$(uname -r)"
+    grub_cfg="$(locate_grub_cfg || true)"
+    tools="$(detect_grub_tools)"
+    setdef_cmd="${tools##*|}"
+    new_id=""
+    [[ -n "$grub_cfg" ]] && new_id="$(find_grub_entry_id "$running" "$grub_cfg" || true)"
+
+    print_kv "当前内核" "$running"
+
+    if [[ -z "$grub_cfg" || -z "$setdef_cmd" || -z "$new_id" ]]; then
+        print_warn "无法将当前内核固定为默认（缺少 GRUB 配置/工具或菜单项）"
+        [[ -z "$grub_cfg" ]]   && print_warn "未找到 grub.cfg"
+        [[ -z "$setdef_cmd" ]] && print_warn "未找到 grub-set-default / grub2-set-default 工具"
+        [[ -z "$new_id" ]]     && print_warn "未在 GRUB 菜单中定位到当前内核 ${running} 的启动项"
+        return 1
+    fi
+
+    # 确保 /etc/default/grub 使用 GRUB_DEFAULT=saved，否则 set-default 不会被遵循
+    local grub_default="/etc/default/grub"
+    if [[ -f "$grub_default" ]]; then
+        if [[ ! -f "${grub_default}.easybbr3.bak" ]]; then
+            cp -a "$grub_default" "${grub_default}.easybbr3.bak" 2>/dev/null || true
+        fi
+        if grep -qE '^GRUB_DEFAULT=' "$grub_default" 2>/dev/null; then
+            if ! grep -qE '^GRUB_DEFAULT=saved[[:space:]]*$' "$grub_default" 2>/dev/null; then
+                sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' "$grub_default" 2>/dev/null || true
+            fi
+        else
+            echo 'GRUB_DEFAULT=saved' >> "$grub_default" 2>/dev/null || true
+        fi
+    else
+        print_warn "未找到 ${grub_default}，无法设置 GRUB_DEFAULT=saved"
+        return 1
+    fi
+
+    if "$setdef_cmd" "$new_id" 2>/dev/null; then
+        print_success "已将当前内核 ${running} 固定为永久默认启动项"
+    else
+        print_warn "无法将当前内核 ${running} 设为默认（${setdef_cmd} 执行失败），请手动设置"
+        return 1
+    fi
+
+    # 已转正：若存在待确认标记则清理
+    if [[ -f "$KERNEL_PENDING_FILE" ]]; then
+        rm -f "$KERNEL_PENDING_FILE" 2>/dev/null || true
+        print_info "已清除一次性引导待确认标记。"
+    fi
+
+    print_kv "默认启动项" "${running}（已转正为永久默认）"
     return 0
 }
 
@@ -8844,12 +8924,13 @@ show_main_menu() {
             "卸载配置" \
             "安装快捷命令 bbr3" \
             "更新脚本 (从 GitHub 获取最新版本)" \
-            "PVE Tools 一键脚本"
-        
-        read_choice "请选择" 10
-        
+            "PVE Tools 一键脚本" \
+            "🔧 固定/转正当前内核为默认 (一次性引导后用此项确认)"
+
+        read_choice "请选择" 11
+
         case "$MENU_CHOICE" in
-            0) 
+            0)
                 print_info "感谢使用，再见！"
                 exit 0
                 ;;
@@ -8863,6 +8944,7 @@ show_main_menu() {
             8) install_shortcut ;;
             9) update_script ;;
             10) run_pvetools ;;
+            11) pin_current_kernel ;;
         esac
         
         echo
